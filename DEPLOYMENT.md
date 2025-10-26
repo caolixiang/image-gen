@@ -1,6 +1,15 @@
 # Cloudflare Pages Deployment Guide
 
-This guide provides step-by-step instructions for deploying the AI Image Studio to Cloudflare Pages with R2 storage.
+This guide provides step-by-step instructions for deploying the AI Image & Video Studio to Cloudflare Pages with R2 storage.
+
+## What You'll Deploy
+
+- **Image Generation**: Midjourney & nano-banana support
+- **Video Generation**: Sora-2 and other video models
+- **Image Description**: AI-powered image analysis
+- **R2 Storage**: Automatic saving of images and videos
+- **State Management**: Zustand-powered persistence
+- **Polling Recovery**: Resume progress after page refresh
 
 ## Prerequisites
 
@@ -19,8 +28,12 @@ Before you begin, ensure you have:
 2. Navigate to **R2 Object Storage** in the sidebar
 3. Click **Create bucket**
 4. Enter bucket name: `image-gen-storage`
-5. Choose your preferred location
+   - This will store both images and videos
+   - Folder structure: `images/` and `videos/`
+5. Choose your preferred location (e.g., APAC, WNAM, EEUR)
 6. Click **Create bucket**
+
+**Important:** This single bucket stores all content (images + videos). No need for separate buckets.
 
 ### 1.2 Configure R2 Public Access
 
@@ -47,26 +60,41 @@ Create a Worker to proxy R2 content with custom logic (see [Cloudflare R2 docs](
 
 ### 1.3 Update Your Code
 
-Edit `functions/api/save-image.ts` line 54:
+You need to update the R2 public URL in **two** files:
+
+#### File 1: `functions/api/save-image.ts`
+
+Find line ~54 and update:
 
 ```typescript
-// Replace YOUR_R2_PUBLIC_URL with your actual URL from step 1.2
+// Replace YOUR_R2_PUBLIC_URL with your actual URL
 const publicUrl = `https://YOUR_R2_PUBLIC_URL/${key}`
 ```
 
-For example:
+#### File 2: `functions/api/save-video.ts`
+
+Find line ~54 and update:
 
 ```typescript
-const publicUrl = `https://pub-abc123.r2.dev/${key}`
-// or
-const publicUrl = `https://images.yourdomain.com/${key}`
+// Replace YOUR_R2_PUBLIC_URL with your actual URL  
+const publicUrl = `https://YOUR_R2_PUBLIC_URL/${key}`
 ```
 
-Commit and push this change:
+**Example:**
+
+```typescript
+// Using R2.dev domain
+const publicUrl = `https://pub-abc123.r2.dev/${key}`
+
+// Using custom domain
+const publicUrl = `https://cdn.yourdomain.com/${key}`
+```
+
+**Commit and push:**
 
 ```bash
-git add functions/api/save-image.ts
-git commit -m "Configure R2 public URL"
+git add functions/api/save-image.ts functions/api/save-video.ts
+git commit -m "Configure R2 public URLs for images and videos"
 git push
 ```
 
@@ -201,37 +229,97 @@ Cloudflare automatically provisions an SSL certificate. This usually takes 5-15 
 
 1. Visit your deployment URL
 2. Click the **Settings** icon (top right)
-3. Enter test API credentials:
-   - Base URL: Your AI API endpoint
-   - API Key: Your API key
-4. Try generating an image
+3. Select API provider and enter credentials:
+   - **Provider**: Choose Midjourney, tuzi (Sora), or nano-banana
+   - **Base URL**: Your AI API endpoint
+   - **API Key**: Your API key
+4. Click **Save**
 
-### 5.2 Test R2 Storage
+### 5.2 Test Image Generation
 
-1. Generate an image successfully
-2. Check browser Network tab for `/api/save-image` request
-3. Verify the response contains an R2 URL
-4. Open the R2 URL directly in a new tab to confirm image is accessible
+1. Go to **Generate Image** tab
+2. Enter a test prompt: `A beautiful sunset over mountains`
+3. Click **Generate Image**
+4. Wait for generation (progress bar shows status)
+5. Verify image appears and is saved to R2
+6. Check Network tab for `/api/save-image` request
+7. Verify response contains R2 URL
+8. Open R2 URL directly to confirm accessibility
 
-### 5.3 Common Issues
+### 5.3 Test Video Generation
+
+1. Go to **Generate Video** tab
+2. Enter description: `A cat walking in a garden`
+3. Select aspect ratio and duration
+4. Click **Generate Video**
+5. Wait for generation (status updates in real-time)
+6. Verify video appears and plays correctly
+7. Check Network tab for `/api/save-video` request
+8. Test **Remix** button on generated video
+
+### 5.4 Test Image Description
+
+1. Go to **Describe Image** tab
+2. Upload a test image
+3. Click **Analyze Image**
+4. Wait for analysis
+5. Verify 4 prompt variations appear
+6. Test **Copy** button on descriptions
+
+### 5.5 Test State Persistence
+
+1. **Tab Switching**: Start generating → switch tabs → switch back
+   - ✅ Should resume polling
+2. **Page Refresh**: Start generating → refresh page (F5)
+   - ✅ Should continue where it left off
+3. **Browser Console**: Check for logs
+   - `🔄 检测到未完成的任务，恢复轮询`
+4. **localStorage**: Verify state is saved
+   ```javascript
+   localStorage.getItem('image-generator-storage')
+   localStorage.getItem('video-generator-storage')
+   localStorage.getItem('image-describer-storage')
+   ```
+
+### 5.6 Common Issues
 
 **R2 binding not working:**
 
 - Check binding variable name is exactly `IMAGE_BUCKET`
-- Verify bucket exists and has correct name
+- Verify bucket exists and has correct name `image-gen-storage`
 - Redeploy after adding binding
+- Check Functions logs in Cloudflare dashboard
 
-**Images not loading:**
+**Images/Videos not loading:**
 
-- Verify R2 public URL is correctly configured in code
+- Verify R2 public URL is correctly configured in both:
+  - `functions/api/save-image.ts`
+  - `functions/api/save-video.ts`
 - Check R2 public access is enabled
 - Look for CORS errors in browser console
+- Test R2 URL directly in browser
+
+**Polling not resuming:**
+
+- Check browser console for polling logs
+- Verify localStorage is working (not blocked by privacy extensions)
+- Clear localStorage and try again: `localStorage.clear()`
+- Check that `taskId` is being saved to Zustand store
 
 **Build failures:**
 
 - Check build logs in Cloudflare dashboard
 - Verify `package.json` scripts are correct
-- Ensure pnpm-lock.yaml is committed
+- Ensure `pnpm-lock.yaml` is committed
+- Check Node.js version (requires 18+)
+- Try local build first: `pnpm build`
+
+**API calls failing:**
+
+- Verify API credentials in Settings
+- Check API endpoints match your provider's format
+- Look for CORS errors (API must allow your domain)
+- Test API with curl/Postman independently
 
 ## Part 6: Monitoring & Maintenance
 
@@ -300,12 +388,61 @@ If calling external APIs:
 
 ## Next Steps
 
+- [ ] Test all three features (Image, Video, Describe)
+- [ ] Verify state persistence works correctly
+- [ ] Test polling recovery mechanism
 - [ ] Set up custom domain for your app
-- [ ] Configure custom domain for R2 bucket
+- [ ] Configure custom domain (CDN) for R2 bucket
 - [ ] Set up monitoring and alerts
-- [ ] Configure analytics tracking
+- [ ] Configure analytics tracking (Google Analytics, Plausible, etc.)
 - [ ] Implement rate limiting (if needed)
-- [ ] Set up staging environment
+- [ ] Set up staging environment (preview branch)
+- [ ] Configure backup strategy for R2 content
+- [ ] Document your API integration for team members
+
+## Performance Tips
+
+### Optimize R2 Access
+
+1. **Use Custom Domain**: Faster than R2.dev subdomain
+2. **Enable Cloudflare CDN**: Cache R2 content globally
+3. **Configure Cache Rules**: Set appropriate TTLs for images/videos
+4. **Use Transform Rules**: Optimize image sizes on-the-fly
+
+### Optimize Application
+
+1. **Enable Cloudflare Speed Features**:
+   - Brotli compression
+   - Early Hints
+   - HTTP/3
+   - Rocket Loader
+
+2. **Monitor Performance**:
+   - Use Cloudflare Analytics
+   - Check Core Web Vitals
+   - Monitor API response times
+   - Track R2 bandwidth usage
+
+3. **State Management**:
+   - localStorage is limited to ~5-10MB
+   - Only store necessary data
+   - Consider cleanup of old state
+
+## Security Considerations
+
+1. **API Keys**: Never commit API keys to git
+   - Use environment variables for sensitive data
+   - Rotate keys regularly
+
+2. **R2 Access Control**:
+   - Use signed URLs for private content
+   - Configure bucket permissions properly
+   - Monitor access logs
+
+3. **Rate Limiting**:
+   - Consider Cloudflare WAF rules
+   - Implement API rate limiting
+   - Monitor abuse patterns
 
 ## Resources
 

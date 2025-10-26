@@ -1,6 +1,6 @@
 import type React from "react"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -41,11 +41,12 @@ import { Slider } from "@/components/ui/slider"
 import {
   generateWithNanoBanana,
   submitMidjourneyTask,
-  pollMidjourneyTask,
+  fetchMidjourneyTaskStatus,
   saveImagesToR2,
 } from "@/lib/api/image-generation"
 import { proxyImageUrl } from "@/lib/proxy-image"
 import { listStoredImages, deleteStoredImage } from "@/lib/api/image-storage"
+import { useImageStore } from "@/store/image-store"
 
 interface ImageGeneratorProps {
   config: {
@@ -57,30 +58,35 @@ interface ImageGeneratorProps {
 type ServiceType = "nano-banana" | "midjourney"
 
 export function ImageGenerator({ config }: ImageGeneratorProps) {
-  // Basic states
-  const [prompt, setPrompt] = useState("")
-  const [model, setModel] = useState("gemini-2.5-flash-image")
-  const [loading, setLoading] = useState(false)
-  const [generatedImages, setGeneratedImages] = useState<string[]>([])
-  const [error, setError] = useState<string | null>(null)
-  const [referenceImages, setReferenceImages] = useState<string[]>([])
+  // Zustand store - 持久化状态
+  const {
+    prompt, setPrompt,
+    model, setModel,
+    loading, setLoading,
+    generatedImages, setGeneratedImages,
+    error, setError,
+    referenceImages, addReferenceImage, removeReferenceImage,
+    loadingStoredImages, setLoadingStoredImages,
+    serviceType, setServiceType,
+    generationCount, setGenerationCount,
+    imageSize, setImageSize,
+    taskId, setTaskId,
+    taskStatus, setTaskStatus,
+    progress, setProgress,
+    mjBotType, setMjBotType,
+    mjMode, setMjMode,
+    aspectRatio, setAspectRatio,
+    setIsPolling,
+  } = useImageStore()
+
+  // Local UI state - 不需要持久化
   const [previewImage, setPreviewImage] = useState<string | null>(null)
-  const [loadingStoredImages, setLoadingStoredImages] = useState(true)
-
-  // Service selection
-  const [serviceType, setServiceType] = useState<ServiceType>("midjourney")
-
-  // nano-banana specific states
-  const [generationCount, setGenerationCount] = useState(1)
-  const [imageSize, setImageSize] = useState("1024x1024")
-
-  // Midjourney specific states
-  const [taskId, setTaskId] = useState<string | null>(null)
-  const [taskStatus, setTaskStatus] = useState<string>("")
-  const [progress, setProgress] = useState(0)
-  const [mjBotType, setMjBotType] = useState("MID_JOURNEY")
-  const [mjMode, setMjMode] = useState<string>("RELAX")
-  const [aspectRatio, setAspectRatio] = useState<string>("")
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
+  const [deletingImage, setDeletingImage] = useState<{ imageUrl: string; index: number } | null>(null)
+  
+  // 轮询定时器
+  const pollingTimerRef = useRef<number | null>(null)
+  const pollingErrorCountRef = useRef(0)
 
   // 页面加载时从 R2 获取已生成的图片
   useEffect(() => {
@@ -96,8 +102,101 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
       }
     }
 
-    loadStoredImages()
+    // 只在组件首次挂载且没有已加载的图片时才加载
+    if (generatedImages.length === 0 && !loadingStoredImages) {
+      loadStoredImages()
+    }
+    
+    // 如果有正在进行的任务，恢复轮询
+    if (taskId && loading && serviceType === 'midjourney' && !pollingTimerRef.current) {
+      console.log('🔄 检测到未完成的图片生成任务，恢复轮询:', taskId)
+      startPollingWithTaskId(taskId)
+    }
   }, []) // 空依赖数组，只在组件挂载时执行一次
+  
+  // 清理定时器
+  useEffect(() => {
+    return () => {
+      if (pollingTimerRef.current) {
+        clearInterval(pollingTimerRef.current)
+      }
+    }
+  }, [])
+
+  // 轮询函数 - 使用 setInterval 实现
+  const startPollingWithTaskId = (taskId: string) => {
+    if (pollingTimerRef.current) {
+      clearInterval(pollingTimerRef.current)
+    }
+
+    setIsPolling(true)
+    pollingErrorCountRef.current = 0
+
+    pollingTimerRef.current = setInterval(async () => {
+      try {
+        console.log('🔄 轮询图片生成状态，taskId:', taskId)
+        const result = await fetchMidjourneyTaskStatus(config, taskId)
+
+        // 更新进度
+        if (result.progress !== undefined) {
+          setProgress(result.progress)
+        }
+        setTaskStatus(result.status)
+
+        // 成功
+        if (result.status === "SUCCESS") {
+          if (pollingTimerRef.current) {
+            clearInterval(pollingTimerRef.current)
+            pollingTimerRef.current = null
+          }
+          setIsPolling(false)
+          setLoading(false)
+          setProgress(100)
+          setTaskStatus("SUCCESS")
+
+          console.log('✅ 图片生成完成')
+
+          // 获取图片 URL - 优先使用 imageUrls
+          let imageUrls: string[] = []
+          if (result.imageUrls && result.imageUrls.length > 0) {
+            imageUrls = result.imageUrls.map((item) => item.url)
+          } else if (result.imageUrl) {
+            imageUrls = [result.imageUrl]
+          }
+
+          if (imageUrls.length > 0) {
+            // 保存到 R2
+            const savedImages = await saveImagesToR2(imageUrls)
+            setGeneratedImages([...savedImages, ...generatedImages])
+          }
+        } 
+        // 失败
+        else if (result.status === "FAILURE" || result.status === "FAILED") {
+          if (pollingTimerRef.current) {
+            clearInterval(pollingTimerRef.current)
+            pollingTimerRef.current = null
+          }
+          setIsPolling(false)
+          setLoading(false)
+          setProgress(0)
+          setError("图片生成失败")
+        }
+      } catch (error: any) {
+        pollingErrorCountRef.current++
+        console.error('❌ 轮询错误:', error)
+        
+        if (pollingErrorCountRef.current >= 3) {
+          if (pollingTimerRef.current) {
+            clearInterval(pollingTimerRef.current)
+            pollingTimerRef.current = null
+          }
+          setIsPolling(false)
+          setLoading(false)
+          setError(error.message || "查询任务状态失败")
+        }
+      }
+    }, 3000) // 每 3 秒轮询一次
+  }
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -106,14 +205,10 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     Array.from(files).forEach((file) => {
       const reader = new FileReader()
       reader.onloadend = () => {
-        setReferenceImages((prev) => [...prev, reader.result as string])
+        addReferenceImage(reader.result as string)
       }
       reader.readAsDataURL(file)
     })
-  }
-
-  const removeReferenceImage = (index: number) => {
-    setReferenceImages((prev) => prev.filter((_, i) => i !== index))
   }
 
   // nano-banana 生成处理
@@ -129,7 +224,7 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     // 保存到 R2
     const savedImages = await saveImagesToR2(imageUrls)
     // 将新图片添加到现有图片列表的前面
-    setGeneratedImages(prev => [...savedImages, ...prev])
+    setGeneratedImages([...savedImages, ...generatedImages])
   }
 
   // Midjourney 生成处理
@@ -162,21 +257,9 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     setTaskStatus("SUBMITTED")
     setProgress(10)
 
-    // 2. 轮询任务状态
-    // 3. 轮询并获取图片 URLs（4张独立图片）
-    const imageUrls = await pollMidjourneyTask(
-      config,
-      id,
-      (status, progress) => {
-        setTaskStatus(status)
-        setProgress(progress)
-      }
-    )
-
-    // 4. 保存所有图片到 R2
-    const savedImages = await saveImagesToR2(imageUrls)
-    // 将新图片添加到现有图片列表的前面
-    setGeneratedImages(prev => [...savedImages, ...prev])
+    // 2. 使用新的轮询方式（setInterval）
+    console.log('🎬 开始轮询图片生成，taskId:', id)
+    startPollingWithTaskId(id)
   }
 
   // 主生成处理函数
@@ -243,18 +326,24 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     }
   }
 
-  // 删除图片
-  const handleDelete = async (imageUrl: string, index: number) => {
-    if (!confirm("确定要删除这张图片吗？此操作无法撤销。")) {
-      return
-    }
+  // 点击删除按钮
+  const handleDeleteClick = (imageUrl: string, index: number) => {
+    setDeletingImage({ imageUrl, index })
+    setIsDeleteDialogOpen(true)
+  }
+
+  // 确认删除图片
+  const handleDeleteConfirm = async () => {
+    if (!deletingImage) return
 
     try {
-      const success = await deleteStoredImage(imageUrl)
+      const success = await deleteStoredImage(deletingImage.imageUrl)
       
       if (success) {
         // 从列表中移除该图片
-        setGeneratedImages(prev => prev.filter((_, i) => i !== index))
+        setGeneratedImages(generatedImages.filter((_, i) => i !== deletingImage.index))
+        setIsDeleteDialogOpen(false)
+        setDeletingImage(null)
       } else {
         alert("删除失败，请重试")
       }
@@ -268,9 +357,9 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     <div className="grid lg:grid-cols-2 gap-6">
       <Card>
         <CardHeader>
-          <CardTitle>Generate Image</CardTitle>
+          <CardTitle>图片生成</CardTitle>
           <CardDescription>
-            Create stunning images from text descriptions
+            从文本描述创建精美图片
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -303,8 +392,8 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
 
           {/* Model Selector - conditional based on service type */}
           {serviceType === "nano-banana" && (
-            <div className="space-y-2">
-              <Label htmlFor="model">模型</Label>
+            <div className="space-y-1">
+              <Label htmlFor="model" className="text-sm">模型</Label>
               <Select
                 value={model}
                 onValueChange={setModel}
@@ -587,24 +676,22 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
 
       <Card>
         <CardHeader>
-          <CardTitle>Results</CardTitle>
+          <CardTitle>生成结果</CardTitle>
           <CardDescription>
             {loadingStoredImages
-              ? "Loading your images from storage..."
+              ? "正在从存储加载图片..."
               : generatedImages.length > 0
-              ? `${generatedImages.length} image${
-                  generatedImages.length > 1 ? "s" : ""
-                } stored`
-              : "Your generated images will appear here"}
+              ? `已保存 ${generatedImages.length} 张图片`
+              : "你生成的图片将显示在这里"}
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="p-4">
           {loadingStoredImages ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="text-center space-y-3">
-                <Loader2 className="w-8 h-8 mx-auto animate-spin text-primary" />
-                <p className="text-sm text-muted-foreground">
-                  Loading images from storage...
+            <div className="flex items-center justify-center py-6">
+              <div className="text-center space-y-2">
+                <Loader2 className="w-6 h-6 mx-auto animate-spin text-primary" />
+                <p className="text-xs text-muted-foreground">
+                  正在从存储加载图片...
                 </p>
               </div>
             </div>
@@ -626,42 +713,39 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
                         className="w-full h-full object-cover rounded-t-lg transition-transform duration-300 group-hover:scale-105"
                       />
                       <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors duration-300" />
-                    </div>
-                    <div className="p-2 flex gap-2">
-                      <Button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleDownload(image, index)
-                        }}
-                        variant="outline"
-                        size="sm"
-                        className="flex-1 h-8 px-2 text-xs hover:bg-primary hover:text-primary-foreground transition-colors"
-                      >
-                        <Download className="w-3.5 h-3.5 mr-1" />
-                        <span>Download</span>
-                      </Button>
-                      <Button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleDelete(image, index)
-                        }}
-                        variant="outline"
-                        size="sm"
-                        className="flex-1 h-8 px-2 text-xs hover:bg-destructive hover:text-destructive-foreground border-destructive/50 text-destructive transition-colors"
-                      >
-                        <Trash2 className="w-3.5 h-3.5 mr-1" />
-                        <span>Delete</span>
-                      </Button>
+                      {/* 右上角按钮组 - 鼠标悬停时显示 */}
+                      <div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                        <Button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            handleDownload(image, index)
+                          }}
+                          size="sm"
+                          className="h-8 w-8 p-0 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
+                        >
+                          <Download className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            handleDeleteClick(image, index)
+                          }}
+                          size="sm"
+                          className="h-8 w-8 p-0 bg-red-600 hover:bg-red-700 text-white shadow-lg"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
               ))}
             </div>
           ) : (
-            <div className="aspect-square rounded-lg border-2 border-dashed border-border flex items-center justify-center bg-muted/20">
+            <div className="h-32 rounded-lg border-2 border-dashed border-border flex items-center justify-center bg-muted/20">
               <div className="text-center text-muted-foreground">
-                <Wand2 className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                <p className="text-sm">No images generated yet</p>
+                <Wand2 className="w-8 h-8 mx-auto mb-1 opacity-50" />
+                <p className="text-xs">还没有生成图片</p>
               </div>
             </div>
           )}
@@ -672,16 +756,44 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
         open={!!previewImage}
         onOpenChange={() => setPreviewImage(null)}
       >
-        <DialogContent className="max-w-4xl">
+        <DialogContent className="max-w-4xl p-0 [&>button]:hidden">
+          <img
+            src={proxyImageUrl(previewImage || "/placeholder.svg")}
+            alt="Preview"
+            className="w-full h-auto rounded-lg"
+          />
+        </DialogContent>
+      </Dialog>
+
+      {/* 删除确认对话框 */}
+      <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Image Preview</DialogTitle>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <Trash2 className="w-5 h-5" />
+              确认删除图片
+            </DialogTitle>
           </DialogHeader>
-          <div className="relative w-full max-h-[70vh] overflow-auto rounded-lg">
-            <img
-              src={proxyImageUrl(previewImage || "/placeholder.svg")}
-              alt="Preview"
-              className="w-full h-auto rounded-lg"
-            />
+          <div className="space-y-4 pt-4">
+            <p className="text-sm text-muted-foreground">
+              确定要删除这张图片吗？此操作无法撤销。
+            </p>
+            <div className="flex gap-2">
+              <Button
+                onClick={handleDeleteConfirm}
+                className="flex-1 bg-red-600 hover:bg-red-700"
+              >
+                <Trash2 className="w-4 h-4 mr-2" />
+                确认删除
+              </Button>
+              <Button
+                onClick={() => setIsDeleteDialogOpen(false)}
+                variant="outline"
+                className="flex-1"
+              >
+                取消
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

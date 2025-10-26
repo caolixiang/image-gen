@@ -1,5 +1,4 @@
-// Cloudflare Pages Function - 直接使用 R2 Bucket API
-
+// Cloudflare Pages Function - 列出 R2 中的视频
 interface Env {
   IMAGE_BUCKET: R2Bucket
 }
@@ -13,45 +12,35 @@ export const onRequestGet = async (context: { env: Env; request: Request }) => {
     const limit = parseInt(url.searchParams.get('limit') || '100')
     const cursor = url.searchParams.get('cursor') || undefined
 
-    let images: Array<{ key: string; url: string; uploaded: string; size: number }>
+    let videos: Array<{ key: string; url: string; uploaded: string; size: number; metadata?: Record<string, string> }>
     let truncated = false
     let nextCursor: string | undefined
 
-    // 列出 R2 bucket 中的对象（同时支持新的 images/ 和旧的 generated/ 前缀）
-    const [imagesListed, generatedListed] = await Promise.all([
-      env.IMAGE_BUCKET.list({
-        prefix: 'images/',
-        limit: limit,
-        cursor: cursor,
-      }),
-      env.IMAGE_BUCKET.list({
-        prefix: 'generated/',
-        limit: limit,
-        cursor: cursor,
-      })
-    ])
+    // 列出 R2 bucket 中的视频对象
+    const listed = await env.IMAGE_BUCKET.list({
+      prefix: 'videos/',
+      limit: limit,
+      cursor: cursor,
+    })
 
-    // 合并两个列表
-    const allObjects = [...imagesListed.objects, ...generatedListed.objects]
-
-    images = allObjects.map((obj) => ({
+    videos = listed.objects.map((obj) => ({
       key: obj.key,
-      url: `/api/r2-image/${obj.key}`,
+      url: `/api/video/r2-video/${obj.key}`,
       uploaded: obj.uploaded.toISOString(),
       size: obj.size,
+      metadata: obj.customMetadata,
     }))
 
-    // 检查是否有更多数据（任一列表被截断）
-    truncated = imagesListed.truncated || generatedListed.truncated
-    nextCursor = imagesListed.truncated ? imagesListed.cursor : (generatedListed.truncated ? generatedListed.cursor : undefined)
+    truncated = listed.truncated
+    nextCursor = listed.truncated ? listed.cursor : undefined
 
     // 按上传时间倒序排序（最新的在前）
-    images.sort((a, b) => new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime())
+    videos.sort((a, b) => new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime())
 
     return new Response(
       JSON.stringify({
         success: true,
-        images: images,
+        videos: videos,
         truncated: truncated,
         cursor: nextCursor,
       }),
@@ -63,7 +52,7 @@ export const onRequestGet = async (context: { env: Env; request: Request }) => {
       }
     )
   } catch (error) {
-    console.error('Error listing images from R2:', error)
+    console.error('Error listing videos from R2:', error)
     return new Response(
       JSON.stringify({
         success: false,
@@ -89,5 +78,3 @@ export const onRequestOptions = async () => {
     },
   })
 }
-
-

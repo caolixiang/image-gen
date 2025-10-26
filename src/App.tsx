@@ -2,6 +2,7 @@ import { useState } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ImageGenerator } from "@/components/image-generator"
 import { ImageDescriber } from "@/components/image-describer"
+import { VideoGenerator } from "@/components/video-generator"
 import { ConfigPanel } from "@/components/config-panel"
 import { Toaster } from "@/components/ui/toaster"
 import { Sparkles, Settings } from "lucide-react"
@@ -69,7 +70,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-semibold text-balance">
-                AI Image Studio
+                AI Media Studio
               </h1>
               <p className="text-xs text-muted-foreground">
                 Generate & Describe
@@ -107,12 +108,13 @@ export default function App() {
 
       <main className="container mx-auto px-4 py-4">
         <Tabs
-          defaultValue="generate"
+          defaultValue="video"
           className="w-full"
         >
-          <TabsList className="grid w-full max-w-md mx-auto grid-cols-2 mb-4">
-            <TabsTrigger value="generate">Generate Image</TabsTrigger>
-            <TabsTrigger value="describe">Describe Image</TabsTrigger>
+          <TabsList className="grid w-full max-w-lg mx-auto grid-cols-3 mb-4">
+            <TabsTrigger value="video">视频生成</TabsTrigger>
+            <TabsTrigger value="generate">图片生成</TabsTrigger>
+            <TabsTrigger value="describe">图片描述</TabsTrigger>
           </TabsList>
 
           <TabsContent
@@ -120,6 +122,13 @@ export default function App() {
             className="mt-0"
           >
             <ImageGenerator config={currentConfig} />
+          </TabsContent>
+
+          <TabsContent
+            value="video"
+            className="mt-0"
+          >
+            <VideoGenerator config={currentConfig} />
           </TabsContent>
 
           <TabsContent

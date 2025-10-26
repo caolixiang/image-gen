@@ -1,23 +1,57 @@
-# AI Image Studio
+# AI Image & Video Studio
 
-A modern React SPA for generating and describing images using AI, deployed on Cloudflare Pages with R2 storage.
+A modern React SPA for generating images, creating videos, and describing images using AI. Features advanced state management, seamless tab switching, and automatic progress recovery. Deployed on Cloudflare Pages with R2 storage.
 
 ## Features
 
-- 🎨 **Image Generation**: Generate stunning images from text descriptions using various AI models
-- 🔍 **Image Description**: Upload images to get detailed AI-generated descriptions
-- 💾 **R2 Storage**: Generated images are automatically saved to Cloudflare R2 for persistence
-- 🎨 **Modern UI**: Beautiful interface built with Radix UI and Tailwind CSS
-- 🌙 **Dark Mode**: Full dark mode support
-- ⚡ **Fast**: Built with Vite for optimal performance
+### 🎨 **Image Generation**
+- Generate stunning images from text descriptions
+- Support for multiple AI models (Midjourney, nano-banana)
+- Reference image support for style transfer
+- Configurable aspect ratios and generation modes
+- Automatic saving to R2 storage
+
+### 🎬 **Video Generation**
+- Text-to-video generation with advanced AI models
+- Customizable aspect ratio (16:9, 9:16, 1:1)
+- Duration control (5s, 10s, 15s)
+- Remix functionality for iterating on generated videos
+- Real-time progress tracking
+
+### 🔍 **Image Description**
+- Upload images to get detailed AI-generated descriptions
+- Extract multiple prompt variations from a single image
+- Perfect for reverse-engineering image styles
+
+### 💾 **Smart Storage & State Management**
+- Generated content automatically saved to Cloudflare R2
+- **Zustand-powered state persistence**: Never lose your progress
+- **Seamless tab switching**: Switch between Image, Video, and Describe without losing state
+- **Auto-recovery**: Refresh the page and your generation continues where it left off
+- **Polling recovery**: Resume progress tracking after browser close
+
+### 🎨 **Modern UI/UX**
+- Beautiful interface built with Radix UI and Tailwind CSS
+- Hover-to-reveal action buttons on images/videos
+- Modal preview for fullscreen viewing
+- Delete confirmations for safe operations
+- 🌙 Full dark mode support
+
+### ⚡ **Performance**
+- Built with Vite for optimal performance
+- Smart polling mechanism with automatic cleanup
+- Efficient state management with Zustand
+- Minimal API calls with intelligent caching
 
 ## Tech Stack
 
 - **Frontend**: React 18 + TypeScript + Vite
+- **State Management**: Zustand with persistence middleware
 - **UI Components**: Radix UI + Tailwind CSS
+- **Styling**: Tailwind CSS + CSS Variables
 - **Deployment**: Cloudflare Pages
-- **Storage**: Cloudflare R2
-- **Backend**: Cloudflare Workers Functions
+- **Storage**: Cloudflare R2 (Images & Videos)
+- **Backend**: Cloudflare Pages Functions (Serverless)
 
 ## Prerequisites
 
@@ -126,79 +160,218 @@ Once deployed, open your app and:
 ```
 image-gen/
 ├── src/
-│   ├── components/        # React components
-│   │   ├── ui/           # Radix UI components
-│   │   ├── image-generator.tsx
-│   │   ├── image-describer.tsx
-│   │   └── config-panel.tsx
-│   ├── lib/              # Utility functions
-│   ├── hooks/            # Custom React hooks
-│   ├── App.tsx           # Main app component
-│   ├── main.tsx          # React entry point
-│   └── index.css         # Global styles
-├── functions/
-│   └── api/
-│       └── save-image.ts # Cloudflare Worker for R2 storage
-├── public/               # Static assets
-├── index.html            # HTML entry point
-├── vite.config.ts        # Vite configuration
-├── wrangler.toml         # Cloudflare configuration
-└── package.json
+│   ├── components/           # React components
+│   │   ├── ui/              # Radix UI components (40+ components)
+│   │   ├── image-generator.tsx   # Image generation with polling recovery
+│   │   ├── video-generator.tsx   # Video generation with remix
+│   │   ├── image-describer.tsx   # Image-to-text description
+│   │   ├── config-panel.tsx      # API configuration
+│   │   └── theme-provider.tsx    # Dark mode support
+│   ├── store/               # Zustand state management
+│   │   ├── image-store.ts   # Image generator state & persistence
+│   │   ├── video-store.ts   # Video generator state & persistence
+│   │   └── describe-store.ts # Image describer state & persistence
+│   ├── lib/                 # Utility functions & API clients
+│   │   ├── api/
+│   │   │   ├── image-generation.ts    # Image generation API
+│   │   │   ├── video-generation.ts    # Video generation API
+│   │   │   ├── image-description.ts   # Image description API
+│   │   │   ├── image-storage.ts       # R2 image storage
+│   │   │   └── video-storage.ts       # R2 video storage
+│   │   ├── utils.ts         # General utilities
+│   │   └── proxy-image.ts   # Image proxy for CORS
+│   ├── hooks/               # Custom React hooks
+│   │   ├── use-toast.ts     # Toast notifications
+│   │   └── use-mobile.ts    # Mobile detection
+│   ├── App.tsx              # Main app component with tabs
+│   ├── main.tsx             # React entry point
+│   └── index.css            # Global styles & CSS variables
+├── functions/               # Cloudflare Pages Functions
+│   ├── api/
+│   │   ├── save-image.ts    # Save images to R2
+│   │   ├── save-video.ts    # Save videos to R2
+│   │   ├── list-images.ts   # List stored images
+│   │   ├── list-videos.ts   # List stored videos
+│   │   ├── delete-image.ts  # Delete images from R2
+│   │   ├── delete-video.ts  # Delete videos from R2
+│   │   └── proxy-image.ts   # Proxy external images (CORS)
+│   └── types.d.ts           # TypeScript types for Functions
+├── server/                  # Local development server
+│   └── r2-dev-server.ts     # Mock R2 for local dev
+├── public/                  # Static assets
+├── dist/                    # Build output
+├── index.html               # HTML entry point
+├── vite.config.ts           # Vite configuration
+├── wrangler.toml            # Cloudflare R2 bindings
+├── components.json          # shadcn/ui configuration
+├── tsconfig.json            # TypeScript configuration
+└── package.json             # Dependencies & scripts
 ```
 
 ## API Integration
 
-The app expects your AI API to follow these conventions:
+The app integrates with various AI APIs. Configure your API endpoint and key in the Settings panel.
 
-### Image Generation Endpoint
+### 🎨 Image Generation API
 
-**Request:**
+#### Midjourney (Recommended)
 
-```json
-POST {baseUrl}/generate
-Headers: Authorization: Bearer {apiKey}
-Body: {
-  "prompt": "Your image description",
-  "model": "stable-diffusion-xl",
-  "reference_images": ["base64_image_data"]
+**Submit Task:**
+```
+POST {baseUrl}/mj/submit/imagine
+Authorization: Bearer {apiKey}
+Content-Type: application/json
+
+{
+  "botType": "MID_JOURNEY",  // or "NIJI_JOURNEY"
+  "prompt": "a beautiful sunset --ar 16:9",
+  "base64Array": [],  // optional reference images
+  "accountFilter": {
+    "modes": ["RELAX"],  // or ["FAST", "TURBO"]
+    "remix": true
+  }
 }
 ```
 
 **Response:**
-
 ```json
 {
-  "images": ["https://url-to-image.png"],
-  // or
-  "image_url": "https://url-to-image.png",
-  // or
-  "url": "https://url-to-image.png",
-  // or
-  "image": "https://url-to-image.png"
+  "code": 1,
+  "description": "Submit Success",
+  "result": "task_id_here"
 }
 ```
 
-### Image Description Endpoint
+**Query Status:**
+```
+GET {baseUrl}/mj/task/{taskId}/fetch
+Authorization: Bearer {apiKey}
+```
+
+**Response:**
+```json
+{
+  "status": "SUCCESS",
+  "progress": "100%",
+  "imageUrl": "https://cdn.example.com/merged.png",
+  "imageUrls": [
+    { "url": "https://cdn.example.com/image1.png" },
+    { "url": "https://cdn.example.com/image2.png" },
+    { "url": "https://cdn.example.com/image3.png" },
+    { "url": "https://cdn.example.com/image4.png" }
+  ]
+}
+```
+
+#### nano-banana (Alternative)
 
 **Request:**
+```
+POST {baseUrl}/v1/images/generations
+Authorization: Bearer {apiKey}
+Content-Type: application/json
 
-```json
-POST {baseUrl}/describe
-Headers: Authorization: Bearer {apiKey}
-Body: {
-  "image": "base64_image_data"
+{
+  "model": "gemini-2.5-flash-image",
+  "prompt": "a beautiful sunset",
+  "n": 1,
+  "size": "1024x1024"
 }
 ```
 
 **Response:**
-
 ```json
 {
-  "description": "Detailed image description",
-  // or
-  "prompt": "Image description",
-  // or
-  "text": "Image description"
+  "data": [
+    { "url": "https://example.com/image.png" }
+  ]
+}
+```
+
+### 🎬 Video Generation API
+
+**Submit Task:**
+```
+POST {baseUrl}/v1/videos
+Authorization: Bearer {apiKey}
+Content-Type: application/json
+
+{
+  "model": "sora-2",
+  "prompt": "a cat playing with a ball",
+  "resolution": "720p",
+  "aspect_ratio": "16:9"
+}
+```
+
+**Response:**
+```json
+{
+  "id": "sora-2:task_xxxxx",
+  "status": "pending"
+}
+```
+
+**Query Status:**
+```
+GET {baseUrl}/v1/videos/{taskId}
+Authorization: Bearer {apiKey}
+```
+
+**Response:**
+```json
+{
+  "id": "sora-2:task_xxxxx",
+  "status": "completed",
+  "progress": 100,
+  "video_url": "https://example.com/video.mp4"
+}
+```
+
+**Remix Video:**
+```
+POST {baseUrl}/v1/videos/{videoId}/remix
+Authorization: Bearer {apiKey}
+Content-Type: application/json
+
+{
+  "prompt": "make the cat's eyes red"
+}
+```
+
+### 🔍 Image Description API
+
+**Submit Task:**
+```
+POST {baseUrl}/mj/submit/describe
+Authorization: Bearer {apiKey}
+Content-Type: application/json
+
+{
+  "base64": "data:image/png;base64,iVBORw0KGgo..."
+}
+```
+
+**Response:**
+```json
+{
+  "code": 1,
+  "description": "Submit Success",
+  "result": "describe_task_id"
+}
+```
+
+**Query Status:**
+```
+GET {baseUrl}/mj/task/{taskId}/fetch
+Authorization: Bearer {apiKey}
+```
+
+**Response:**
+```json
+{
+  "status": "SUCCESS",
+  "prompt": "1️⃣ description one 2️⃣ description two 3️⃣ description three 4️⃣ description four"
 }
 ```
 
@@ -216,25 +389,88 @@ No environment variables are required for the frontend. All configuration is don
 
 For Workers Functions, R2 bindings are configured in `wrangler.toml`.
 
+## Key Features Explained
+
+### 💾 State Persistence with Zustand
+
+All your work is automatically saved to browser localStorage:
+
+- **Image Generator**: Prompts, model settings, reference images, generated images
+- **Video Generator**: Descriptions, aspect ratios, durations, generated videos  
+- **Image Describer**: Descriptions (preview images are not serializable)
+
+**Benefits:**
+- Switch between tabs without losing progress
+- Refresh the page and continue where you left off
+- Close browser and reopen - your state is restored
+
+### 🔄 Polling Recovery Mechanism
+
+When generating images/videos/descriptions:
+
+1. **Start generation** → Task submitted, `taskId` saved
+2. **Switch tabs** → Polling pauses, state persists
+3. **Switch back** → Polling automatically resumes!
+4. **Refresh page** → State restored, polling resumes
+5. **Close browser** → State saved, resume next time
+
+**Technical Implementation:**
+- Uses `setInterval` for polling (instead of `while` loops)
+- Automatic cleanup on component unmount
+- Auto-recovery on component remount
+- Error retry (up to 3 times)
+
+### 🎨 UI/UX Highlights
+
+**Hover Actions:**
+- Hover over images/videos to reveal Download, Remix (videos), Delete buttons
+- Buttons arranged vertically in top-right corner
+- Smooth opacity transitions
+
+**Modal Previews:**
+- Click any image/video for fullscreen preview
+- Click outside or ESC to close
+- Native video controls for playback
+
+**Delete Confirmation:**
+- Modal dialog confirms before deleting
+- Prevents accidental deletions
+- Shows warning icon
+
 ## Troubleshooting
 
-### Images not saving to R2
+### Images/Videos not saving to R2
 
-1. Verify R2 bucket binding is configured correctly in Cloudflare dashboard
-2. Check that `IMAGE_BUCKET` variable name matches in `wrangler.toml` and `save-image.ts`
-3. Ensure R2 public URL is configured correctly
+1. Verify R2 bucket binding: `IMAGE_BUCKET` in Cloudflare dashboard
+2. Check `wrangler.toml` has correct bucket name
+3. Ensure R2 public URL is configured in `functions/api/save-image.ts`
+4. Check browser console for R2 errors
+
+### Polling not resuming after tab switch
+
+1. Check browser console for "🔄 检测到未完成的任务" message
+2. Verify `localStorage` has state: `localStorage.getItem('image-generator-storage')`
+3. Clear localStorage if corrupted: `localStorage.clear()`
+
+### State not persisting
+
+1. Check if localStorage is enabled in browser
+2. Verify no privacy extensions blocking localStorage
+3. Check console for Zustand persist errors
 
 ### API calls failing
 
-1. Verify your API credentials in the settings panel
+1. Verify API credentials in Settings panel
 2. Check browser console for CORS errors
-3. Ensure your AI API endpoints match the expected format
+3. Ensure API endpoints match expected format (see API Integration)
+4. Test API with curl/Postman first
 
 ### Build errors
 
-1. Clear node_modules and reinstall: `rm -rf node_modules pnpm-lock.yaml && pnpm install`
-2. Ensure you're using Node.js 18+
-3. Check TypeScript errors: `pnpm build`
+1. Clear cache: `rm -rf node_modules dist pnpm-lock.yaml`
+2. Reinstall: `pnpm install`
+3. Check Node version: `node -v` (requires 18+)
+4. Build: `pnpm build`
 
 ## License
 

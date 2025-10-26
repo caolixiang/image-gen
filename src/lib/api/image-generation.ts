@@ -204,12 +204,12 @@ export async function pollMidjourneyTask(
         onProgress(result.status, 100)
       }
 
-      // 优先返回 imageUrls 数组（4张独立图片）
+      // 优先使用 imageUrls 数组（4张独立图片）
       if (result.imageUrls && result.imageUrls.length > 0) {
         return result.imageUrls.map((item) => item.url)
       }
 
-      // 降级方案：如果没有 imageUrls，使用拼接的汇总图
+      // 降级方案：如果没有 imageUrls，使用 imageUrl（合并图片）
       if (result.imageUrl) {
         return [result.imageUrl]
       }
