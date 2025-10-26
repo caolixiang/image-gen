@@ -1,0 +1,10 @@
+name = "image-gen"
+compatibility_date = "2024-01-01"
+
+pages_build_output_dir = "dist"
+
+# R2 bucket binding for image storage
+[[r2_buckets]]
+binding = "IMAGE_BUCKET"
+bucket_name = "image-gen-storage"
+
