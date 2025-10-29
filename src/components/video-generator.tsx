@@ -27,13 +27,9 @@ import {
   Download,
   Trash2,
   Sparkles,
+  RotateCcw,
 } from "lucide-react"
-import {
-  generateVideo,
-  getVideoStatus,
-  remixVideo,
-  type VideoGenerationParams,
-} from "@/lib/api/video-generation"
+import { getVideoStatus, remixVideo } from "@/lib/api/video-generation"
 import {
   uploadVideoToR2,
   listStoredVideosPage,
@@ -43,6 +39,7 @@ import {
 import { useToast } from "@/hooks/use-toast"
 import { useVideoStore } from "@/store/video-store"
 import { useTaskStore } from "@/store/task-store"
+import { useJobQueue } from "@/store/job-queue"
 
 interface VideoGeneratorProps {
   config: {
@@ -101,11 +98,29 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
   const [videoNextCursor, setVideoNextCursor] = useState<string | undefined>(
     undefined
   )
+  // avoid unused warning for imageFile (only used to preview referenceImage)
+  void imageFile
+
   const [videoHasMore, setVideoHasMore] = useState(false)
   const [loadingMoreVideos, setLoadingMoreVideos] = useState(false)
 
   // 轮询定时器
   const pollingTimerRef = useRef<number | null>(null)
+  // Job queue hooks (video)
+  const { jobs, enqueueVideoJob, retryTimeoutJob, cancelTimeoutJob, init } =
+    useJobQueue()
+  useEffect(() => {
+    init()
+  }, [])
+
+  const inProgressVideoJobs = jobs.filter(
+    (j) =>
+      j.kind === "video" &&
+      ["queued", "submitting", "processing", "saving", "timeout"].includes(
+        j.status
+      )
+  )
+
   const pollingErrorCountRef = useRef(0)
 
   const getPollingConfigForTask = (
@@ -132,16 +147,22 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     // 如果有正在进行的任务，恢复轮询（从持久化任务存储恢复，使用提交时的 provider 配置）
     const { videoTaskId, videoProviderId } = useTaskStore.getState()
     if (videoTaskId && !pollingTimerRef.current) {
-      console.log(
-        "🔄 检测到未完成的视频任务，恢复轮询:",
-        videoTaskId,
-        "provider:",
-        videoProviderId
-      )
-      setIsGenerating(true)
-      setCurrentTaskId(videoTaskId)
-      const resumeConfig = getPollingConfigForTask(videoProviderId, config)
-      startPollingWithTaskId(videoTaskId, resumeConfig)
+      // 若该任务已由队列托管，则不再在组件中恢复旧轮询，避免重复注入
+      const managedByQueue = useJobQueue
+        .getState()
+        .jobs.some((j) => j.kind === "video" && j.taskId === videoTaskId)
+      if (!managedByQueue) {
+        console.log(
+          "🔄 检测到未完成的视频任务，恢复轮询:",
+          videoTaskId,
+          "provider:",
+          videoProviderId
+        )
+        setIsGenerating(true)
+        setCurrentTaskId(videoTaskId)
+        const resumeConfig = getPollingConfigForTask(videoProviderId, config)
+        startPollingWithTaskId(videoTaskId, resumeConfig)
+      }
     }
   }, [])
 
@@ -254,72 +275,28 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     }
 
     try {
-      setIsGenerating(true)
-      setProgress(0)
-      setStatusText("正在提交任务...")
-      setCurrentTaskId("")
-      setCurrentVideoUrl("")
-      pollingErrorCountRef.current = 0
-
-      // 转换参数格式
-      const sizeMap: Record<string, string> = {
-        "9:16": "720x1280",
-        "16:9": "1280x720",
-        "16:9 HD": "1920x1080",
-      }
-
-      const secondsMap: Record<string, number> = {
-        "15s": 15,
-        "10s": 10,
-      }
-
-      const params: VideoGenerationParams = {
-        prompt: description,
-        imageFile: imageFile || undefined,
-        model: "sora-2",
-        size: sizeMap[aspectRatio],
-        seconds: secondsMap[duration],
-        watermark: false,
-      }
-
-      const task = await generateVideo(config.baseUrl, config.apiKey, params)
-
-      console.log("🎬 视频生成任务返回:", task)
-      console.log("🎬 Task ID:", task.id)
-
-      setCurrentTaskId(task.id)
-      setStatusText("任务已提交，正在生成视频...")
-
-      // 写入持久化任务（记录 providerId）
       const cfgAll = loadProvidersConfig()
-      useTaskStore
-        .getState()
-        .setTask("video", task.id, cfgAll.selectedProviderId)
-
-      // 使用提交时的 provider 配置开始轮询
-      startPollingWithTaskId(
-        task.id,
-        getPollingConfigForTask(cfgAll.selectedProviderId, config)
+      enqueueVideoJob(
+        {
+          prompt: description,
+          referenceImageBase64: referenceImage || undefined,
+          aspectRatio,
+          duration,
+          model: "sora-2",
+        },
+        { providerId: cfgAll.selectedProviderId, configFallback: config }
       )
-    } catch (error: any) {
-      setIsGenerating(false)
-      setProgress(0)
-      setStatusText("")
-
-      let errorMessage = "视频生成失败"
-      if (error.response) {
-        errorMessage =
-          error.response?.data?.message ||
-          error.response?.data?.error?.message ||
-          `请求失败 (${error.response.status})`
-      } else if (error.request) {
-        errorMessage = "网络请求超时，请检查网络连接"
-      } else {
-        errorMessage = error.message || "未知错误"
-      }
-
       toast({
-        title: "生成失败",
+        title: "已加入队列",
+        description: "占位已显示，完成后自动保存到相册",
+      })
+    } catch (error: any) {
+      const errorMessage =
+        (error?.message && typeof error.message === "string"
+          ? error.message
+          : "视频生成任务提交失败") || "视频生成任务提交失败"
+      toast({
+        title: "出错了",
         description: errorMessage,
         variant: "destructive",
       })
@@ -360,6 +337,15 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
           setIsGenerating(false)
           setProgress(100)
           setStatusText("视频生成完成！")
+
+          // 若该任务由队列托管，则不在组件里再次注入 UI/保存，交由队列完成
+          const isManagedByQueue = useJobQueue
+            .getState()
+            .jobs.some((j) => j.kind === "video" && j.taskId === taskId)
+          if (isManagedByQueue) {
+            useTaskStore.getState().setTask("video", null)
+            return
+          }
 
           // 设置视频 URL 用于预览
           if (task.video_url) {
@@ -714,7 +700,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
 
           <Button
             onClick={handleGenerate}
-            disabled={isGenerating || !description.trim()}
+            disabled={!description.trim()}
             className="w-full h-10 text-sm"
             size="lg"
           >
@@ -761,7 +747,78 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {loadingStoredVideos ? (
+          {inProgressVideoJobs.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2 gap-6">
+              {inProgressVideoJobs.map((job) => (
+                <Card
+                  key={job.id}
+                  className="overflow-hidden p-0"
+                >
+                  <CardContent className="p-0">
+                    <div className="bg-muted relative h-64 w-full">
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+                      </div>
+                      <div className="absolute bottom-0 left-0 right-0 p-3">
+                        <div className="w-full bg-secondary rounded-full h-1">
+                          <div
+                            className="bg-primary h-1 rounded-full transition-all duration-300"
+                            style={{
+                              width: `${Math.round(job.progress ?? 0)}%`,
+                            }}
+                          />
+                        </div>
+                        <div className="mt-2 flex justify-between text-xs text-muted-foreground">
+                          <span>
+                            {job.status === "queued"
+                              ? "排队中"
+                              : job.status === "submitting"
+                              ? "提交中"
+                              : job.status === "processing"
+                              ? "生成中"
+                              : job.status === "saving"
+                              ? "保存中"
+                              : job.status === "timeout"
+                              ? "已超时"
+                              : job.status}
+                          </span>
+                          <span>{Math.round(job.progress ?? 0)}%</span>
+                        </div>
+                      </div>
+                      {job.status === "timeout" && (
+                        <div className="absolute top-2 right-2 flex gap-2">
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              retryTimeoutJob(job.id)
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0"
+                            variant="secondary"
+                            title="重试"
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              cancelTimeoutJob(job.id)
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0"
+                            variant="destructive"
+                            title="取消"
+                          >
+                            <X className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          ) : loadingStoredVideos ? (
             <div className="flex items-center justify-center py-12">
               <div className="text-center space-y-3">
                 <Loader2 className="w-8 h-8 mx-auto animate-spin text-primary" />

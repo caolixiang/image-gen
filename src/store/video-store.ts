@@ -62,7 +62,8 @@ export const useVideoStore = create<VideoState>()((set) => ({
   setStatusText: (statusText) => set({ statusText }),
   setCurrentVideoUrl: (url) => set({ currentVideoUrl: url }),
   setCurrentTaskId: (taskId) => set({ currentTaskId: taskId }),
-  setStoredVideos: (videos) => set({ storedVideos: videos }),
+  setStoredVideos: (videos) =>
+    set({ storedVideos: [...new Map(videos.map((v) => [v.key, v])).values()] }),
   setLoadingStoredVideos: (loading) => set({ loadingStoredVideos: loading }),
   setIsPolling: (isPolling) => set({ isPolling }),
   resetCurrentVideo: () =>

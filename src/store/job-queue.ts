@@ -7,7 +7,10 @@ import {
   saveImagesToR2,
   type GenerationConfig,
 } from "@/lib/api/image-generation"
+import { generateVideo, getVideoStatus } from "@/lib/api/video-generation"
+import { uploadVideoToR2 } from "@/lib/api/video-storage"
 import { useImageStore } from "@/store/image-store"
+import { useVideoStore } from "@/store/video-store"
 
 // ---- Types ----
 export type JobKind = "image" | "video"
@@ -32,6 +35,14 @@ export interface ImageJobParams {
   imageSize?: string
 }
 
+export interface VideoJobParams {
+  prompt: string
+  referenceImageBase64?: string
+  aspectRatio?: string
+  duration?: string
+  model?: string
+}
+
 export interface BaseJob {
   id: string
   kind: JobKind
@@ -51,7 +62,13 @@ export interface ImageJob extends BaseJob {
   resultUrls?: string[]
 }
 
-export type Job = ImageJob // 暂时只支持图片；视频稍后接入
+export interface VideoJob extends BaseJob {
+  kind: "video"
+  params: VideoJobParams
+  resultUrl?: string
+}
+
+export type Job = ImageJob | VideoJob
 
 // ---- Config ----
 const DEFAULT_CONCURRENCY: Record<JobKind, number> = {
@@ -106,6 +123,10 @@ interface JobQueueState {
   init: () => void
   enqueueImageJob: (
     params: ImageJobParams,
+    opts?: { providerId?: string | null; configFallback?: GenerationConfig }
+  ) => string
+  enqueueVideoJob: (
+    params: VideoJobParams,
     opts?: { providerId?: string | null; configFallback?: GenerationConfig }
   ) => string
   retryTimeoutJob: (jobId: string) => void
@@ -225,11 +246,40 @@ export const useJobQueue = create<JobQueueState>()(
         return id
       },
 
+      enqueueVideoJob: (params, opts) => {
+        const cfgAll = loadProvidersConfig()
+        const providerId = opts?.providerId ?? cfgAll.selectedProviderId ?? null
+        const id = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+        const job: VideoJob = {
+          id,
+          kind: "video",
+          status: "queued",
+          providerId,
+          taskId: undefined,
+          progress: 0,
+          createdAt: now(),
+          updatedAt: now(),
+          timeoutAt: now() + DEFAULT_TIMEOUT_MS,
+          params,
+        }
+        set((s) => ({ jobs: [...s.jobs, job] }))
+        // 主页面尝试推进
+        setTimeout(() => {
+          if (get().isMaster) {
+            promoteQueuedIfAvailable()
+          } else {
+            // 通知主页面
+            bc?.postMessage({ type: "jobs:update", payload: get().jobs })
+          }
+        }, 0)
+        return id
+      },
+
       retryTimeoutJob: (jobId) => {
         const { jobs, concurrency, isMaster } = get()
         const job = jobs.find(
           (j) => j.id === jobId && j.status === "timeout"
-        ) as ImageJob | undefined
+        ) as Job | undefined
         if (!job) return
         // 重置超时，并尝试恢复轮询
         job.timeoutAt = now() + DEFAULT_TIMEOUT_MS
@@ -241,14 +291,27 @@ export const useJobQueue = create<JobQueueState>()(
             (j.status === "submitting" || j.status === "processing")
         ).length
         if (activeCount < (concurrency[job.kind] || 6)) {
-          job.status = "processing"
-          startImagePolling(
-            job,
-            getEffectiveConfigForProvider(
-              job.providerId,
-              getFallbackFromProvider(job.providerId)
-            )
+          const effective = getEffectiveConfigForProvider(
+            job.providerId,
+            getFallbackFromProvider(job.providerId)
           )
+          if (!job.taskId) {
+            // 重新提交
+            job.status = "submitting"
+            if (job.kind === "image") {
+              startImageSubmission(job as ImageJob)
+            } else {
+              startVideoSubmission(job as VideoJob)
+            }
+          } else {
+            // 直接恢复轮询
+            job.status = "processing"
+            if (job.kind === "image") {
+              startImagePolling(job as ImageJob, effective)
+            } else {
+              startVideoPolling(job as VideoJob, effective)
+            }
+          }
         } else {
           job.status = "queued"
         }
@@ -289,40 +352,63 @@ function getFallbackFromProvider(_providerId: string | null): GenerationConfig {
 
 function promoteQueuedIfAvailable() {
   const { jobs, concurrency } = useJobQueue.getState()
+  // image
   const activeImage = jobs.filter(
     (j) =>
       j.kind === "image" &&
       (j.status === "submitting" || j.status === "processing")
   ).length
   const capImage = concurrency.image || 6
-  if (activeImage >= capImage) return
+  if (activeImage < capImage) {
+    const idx = jobs.findIndex(
+      (j) => j.kind === "image" && j.status === "queued"
+    )
+    if (idx >= 0) {
+      const job = jobs[idx] as ImageJob
+      startImageSubmission(job)
+    }
+  }
 
-  // 取一个 queued 的 image 任务
-  const idx = jobs.findIndex((j) => j.kind === "image" && j.status === "queued")
-  if (idx >= 0) {
-    const job = jobs[idx] as ImageJob
-    // 启动提交
-    startImageSubmission(job)
+  // video
+  const activeVideo = jobs.filter(
+    (j) =>
+      j.kind === "video" &&
+      (j.status === "submitting" || j.status === "processing")
+  ).length
+  const capVideo = concurrency.video || 6
+  if (activeVideo < capVideo) {
+    const vidx = jobs.findIndex(
+      (j) => j.kind === "video" && j.status === "queued"
+    )
+    if (vidx >= 0) {
+      const vjob = jobs[vidx] as VideoJob
+      startVideoSubmission(vjob)
+    }
   }
 }
 
 function resumeActivePollers() {
   const { jobs } = useJobQueue.getState()
   for (const job of jobs) {
-    if (job.kind === "image") {
-      if (
-        (job.status === "processing" || job.status === "submitting") &&
-        !pollTimers.get(job.id)
-      ) {
-        // 若未持有 taskId，则当作重新提交（很少见，除非中断在 submitting）
-        if (!job.taskId) {
+    if (
+      (job.status === "processing" || job.status === "submitting") &&
+      !pollTimers.get(job.id)
+    ) {
+      if (!job.taskId) {
+        if (job.kind === "image") {
           startImageSubmission(job as ImageJob)
         } else {
-          const effective = getEffectiveConfigForProvider(
-            job.providerId,
-            getFallbackFromProvider(job.providerId)
-          )
+          startVideoSubmission(job as VideoJob)
+        }
+      } else {
+        const effective = getEffectiveConfigForProvider(
+          job.providerId,
+          getFallbackFromProvider(job.providerId)
+        )
+        if (job.kind === "image") {
           startImagePolling(job as ImageJob, effective)
+        } else {
+          startVideoPolling(job as VideoJob, effective)
         }
       }
     }
@@ -463,6 +549,155 @@ function startImagePolling(job: ImageJob, effective: GenerationConfig) {
         useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
       } catch (e) {
         // 网络错误等：忽略，等待下次轮询（或由心跳恢复）
+      }
+    }, 5000) as unknown as number
+  )
+}
+
+// ---- Video flow ----
+async function startVideoSubmission(job: VideoJob) {
+  const { jobs } = useJobQueue.getState()
+  const effective = getEffectiveConfigForProvider(
+    job.providerId,
+    getFallbackFromProvider(job.providerId)
+  )
+  if (!effective.baseUrl || !effective.apiKey) {
+    useJobQueue.setState({ jobs: jobs.filter((j) => j.id !== job.id) })
+    return
+  }
+
+  job.status = "submitting"
+  job.updatedAt = now()
+  useJobQueue.setState({ jobs: [...jobs] })
+
+  // helpers
+  const toSize = (ar?: string) => {
+    if (!ar) return "720x1280"
+    if (ar.includes("16:9")) return "1280x720"
+    if (ar.includes("9:16")) return "720x1280"
+    return "720x1280"
+  }
+  const toSeconds = (d?: string) => {
+    if (!d) return 15
+    const m = d.match(/(\d+)/)
+    return m ? parseInt(m[1], 10) : 15
+  }
+  const dataUrlToFile = (dataUrl: string, filename: string): File => {
+    const arr = dataUrl.split(",")
+    const mimeMatch = arr[0].match(/:(.*?);/)
+    const mime = mimeMatch ? mimeMatch[1] : "image/png"
+    const bstr = atob(arr[1])
+    const n = bstr.length
+    const u8arr = new Uint8Array(n)
+    for (let i = 0; i < n; i++) u8arr[i] = bstr.charCodeAt(i)
+    return new File([u8arr], filename, { type: mime })
+  }
+
+  try {
+    const imageFile = job.params.referenceImageBase64
+      ? dataUrlToFile(job.params.referenceImageBase64, "reference.png")
+      : undefined
+
+    const task = await generateVideo(effective.baseUrl, effective.apiKey, {
+      prompt: job.params.prompt,
+      imageFile,
+      model: job.params.model || "sora-2",
+      size: toSize(job.params.aspectRatio),
+      seconds: toSeconds(job.params.duration),
+      watermark: false,
+    })
+
+    job.taskId = task.id
+    job.status = "processing"
+    job.progress = Math.max(10, task.progress || 0)
+    job.updatedAt = now()
+    useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
+
+    startVideoPolling(job, effective)
+  } catch (err) {
+    console.error("Video job submission failed:", err)
+    useJobQueue.setState({
+      jobs: useJobQueue.getState().jobs.filter((j) => j.id !== job.id),
+    })
+  }
+}
+
+function startVideoPolling(job: VideoJob, effective: GenerationConfig) {
+  const existing = pollTimers.get(job.id)
+  if (existing) clearInterval(existing)
+
+  pollTimers.set(
+    job.id,
+    setInterval(async () => {
+      try {
+        if (now() > job.timeoutAt) {
+          clearInterval(pollTimers.get(job.id)!)
+          pollTimers.delete(job.id)
+          job.status = "timeout"
+          job.updatedAt = now()
+          useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
+          return
+        }
+        if (!job.taskId) return
+
+        const task = await getVideoStatus(
+          effective.baseUrl,
+          effective.apiKey,
+          job.taskId
+        )
+        if (typeof task.progress === "number") {
+          job.progress = Math.max(job.progress, task.progress)
+        }
+        job.updatedAt = now()
+
+        if (task.status === "completed") {
+          clearInterval(pollTimers.get(job.id)!)
+          pollTimers.delete(job.id)
+          job.status = "saving"
+          useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
+
+          try {
+            if (!task.video_url) throw new Error("video_url not found")
+            const saved = await uploadVideoToR2(
+              task.video_url,
+              `${job.taskId}.mp4`,
+              job.taskId
+            )
+            job.resultUrl = saved.url
+            job.status = "success"
+            job.progress = 100
+            job.updatedAt = now()
+            // 推入 UI 列表（前置）
+            const { storedVideos, setStoredVideos } = useVideoStore.getState()
+            setStoredVideos([saved, ...storedVideos])
+          } catch (e) {
+            console.error("Save video to R2 failed:", e)
+            // 认为完成（保存会由 pending-uploads 兜底）
+            job.status = "success"
+            job.progress = 100
+            job.updatedAt = now()
+          }
+
+          useJobQueue.setState({
+            jobs: useJobQueue.getState().jobs.filter((j) => j.id !== job.id),
+          })
+          promoteQueuedIfAvailable()
+          return
+        }
+
+        if (task.status === "failed" || task.status === "error") {
+          clearInterval(pollTimers.get(job.id)!)
+          pollTimers.delete(job.id)
+          useJobQueue.setState({
+            jobs: useJobQueue.getState().jobs.filter((j) => j.id !== job.id),
+          })
+          promoteQueuedIfAvailable()
+          return
+        }
+
+        useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
+      } catch (e) {
+        // 网络/临时错误，忽略
       }
     }, 5000) as unknown as number
   )
