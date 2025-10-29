@@ -23,6 +23,10 @@ import {
   clearProvidersConfig,
   getSelectedProvider,
 } from "@/lib/storage"
+import {
+  processPendingUploads,
+  sendBeaconsForPendingUploads,
+} from "@/lib/pending-uploads"
 import type { ProvidersConfig } from "@/lib/constants"
 
 export default function App() {
@@ -40,6 +44,26 @@ export default function App() {
       ]
       oldKeys.forEach((k) => localStorage.removeItem(k))
     } catch {}
+  }, [])
+
+  // 应用启动：自动处理待保存的本地上传队列（兜底补偿）
+  useEffect(() => {
+    processPendingUploads()
+  }, [])
+
+  // 页面关闭前：使用 sendBeacon 兜底把队列推送到服务端
+  useEffect(() => {
+    const handler = () => {
+      try {
+        sendBeaconsForPendingUploads()
+      } catch {}
+    }
+    window.addEventListener("pagehide", handler)
+    window.addEventListener("beforeunload", handler)
+    return () => {
+      window.removeEventListener("pagehide", handler)
+      window.removeEventListener("beforeunload", handler)
+    }
   }, [])
 
   // 获取当前选中的服务商配置

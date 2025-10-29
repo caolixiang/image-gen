@@ -52,7 +52,7 @@ export async function generateWithNanoBanana(
     throw new Error(`API error: ${response.statusText}`)
   }
 
-  const data = await response.json() as {
+  const data = (await response.json()) as {
     data: Array<{ url: string }>
   }
   return data.data.map((item: { url: string }) => item.url)
@@ -96,7 +96,7 @@ export async function submitMidjourneyTask(
     throw new Error(`Failed to submit task: ${response.statusText}`)
   }
 
-  const data = await response.json() as {
+  const data = (await response.json()) as {
     code: number
     description?: string
     result: string
@@ -134,7 +134,7 @@ export async function fetchMidjourneyTaskStatus(
     throw new Error(`Failed to fetch task: ${response.statusText}`)
   }
 
-  const data = await response.json() as {
+  const data = (await response.json()) as {
     status?: string
     progress?: string | number
     imageUrl?: string
@@ -239,6 +239,7 @@ export async function saveImageToR2(imageUrl: string): Promise<string> {
     headers: {
       "Content-Type": "application/json",
     },
+    keepalive: true,
     body: JSON.stringify({ imageUrl }),
   })
 
@@ -248,7 +249,7 @@ export async function saveImageToR2(imageUrl: string): Promise<string> {
     return imageUrl
   }
 
-  const data = await response.json() as {
+  const data = (await response.json()) as {
     url: string
   }
   return data.url
@@ -260,13 +261,21 @@ export async function saveImageToR2(imageUrl: string): Promise<string> {
 export async function saveImagesToR2(imageUrls: string[]): Promise<string[]> {
   const savedImages: string[] = []
 
+  // 引入本地持久化队列，先入队，成功再移除，保证页面关闭也能兜底
+  const { addPendingImage, removePendingImage } = await import(
+    "@/lib/pending-uploads"
+  )
+
   for (const imageUrl of imageUrls) {
     try {
+      addPendingImage(imageUrl)
       const savedUrl = await saveImageToR2(imageUrl)
       savedImages.push(savedUrl)
+      // 成功则从队列移除
+      removePendingImage(imageUrl)
     } catch (error) {
       console.error("Failed to save image:", error)
-      // 失败时使用原始 URL
+      // 失败时使用原始 URL，保留队列待下次自动补偿
       savedImages.push(imageUrl)
     }
   }

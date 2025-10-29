@@ -15,11 +15,18 @@ export async function uploadVideoToR2(
   filename: string,
   taskId?: string
 ): Promise<R2Video> {
+  // 先加入本地队列，保证页面关闭也会被兜底保存
+  const { addPendingVideo, removePendingVideo } = await import(
+    "@/lib/pending-uploads"
+  )
+  addPendingVideo(videoUrl, filename, taskId)
+
   const response = await fetch("/api/video/save-video", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
+    keepalive: true,
     body: JSON.stringify({
       videoUrl,
       filename,
@@ -28,9 +35,12 @@ export async function uploadVideoToR2(
   })
 
   if (!response.ok) {
-    const error = await response.json() as { message?: string }
+    const error = (await response.json()) as { message?: string }
     throw new Error(error.message || "Failed to upload video to R2")
   }
+
+  // 成功则从队列删除
+  removePendingVideo(videoUrl, filename)
 
   return response.json()
 }
@@ -40,13 +50,13 @@ export async function uploadVideoToR2(
  */
 export async function listStoredVideos(): Promise<R2Video[]> {
   const response = await fetch("/api/video/list-videos")
-  
+
   if (!response.ok) {
-    const error = await response.json() as { message?: string }
+    const error = (await response.json()) as { message?: string }
     throw new Error(error.message || "Failed to list videos from R2")
   }
 
-  const result = await response.json() as { videos?: R2Video[] }
+  const result = (await response.json()) as { videos?: R2Video[] }
   return result.videos || []
 }
 
@@ -63,7 +73,7 @@ export async function deleteStoredVideo(key: string): Promise<void> {
   })
 
   if (!response.ok) {
-    const error = await response.json() as { message?: string }
+    const error = (await response.json()) as { message?: string }
     throw new Error(error.message || "Failed to delete video from R2")
   }
 }

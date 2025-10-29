@@ -214,14 +214,13 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
             imageUrls = [result.imageUrl]
           }
 
-          // 任务已完成，清除持久化任务
-          useTaskStore.getState().setTask("image", null)
-
           if (imageUrls.length > 0) {
             // 保存到 R2
             const savedImages = await saveImagesToR2(imageUrls)
             setGeneratedImages([...savedImages, ...generatedImages])
           }
+          // 保存流程结束后再清除持久化任务
+          useTaskStore.getState().setTask("image", null)
         }
         // 失败
         else if (result.status === "FAILURE" || result.status === "FAILED") {

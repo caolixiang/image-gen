@@ -346,8 +346,6 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
             clearInterval(pollingTimerRef.current)
             pollingTimerRef.current = null
           }
-          // 清除持久化任务
-          useTaskStore.getState().setTask("video", null)
 
           setIsPolling(false) // 标记停止轮询
           setIsGenerating(false)
@@ -378,6 +376,8 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                   description: "视频生成完成并已保存到相册！",
                 })
               }
+              // 成功（已存在或新上传完成）后，才清除持久化任务
+              useTaskStore.getState().setTask("video", null)
             } catch (error: any) {
               console.error("保存视频到 R2 失败:", error)
               toast({
@@ -391,6 +391,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
               title: "生成成功",
               description: "视频生成完成！",
             })
+            useTaskStore.getState().setTask("video", null)
           }
         } else if (task.status === "failed" || task.status === "error") {
           // 立即清除定时器，停止轮询
