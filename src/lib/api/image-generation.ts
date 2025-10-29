@@ -244,9 +244,16 @@ export async function saveImageToR2(imageUrl: string): Promise<string> {
   })
 
   if (!response.ok) {
-    // 保存失败，返回原始 URL
-    console.error("Failed to save image to R2")
-    return imageUrl
+    const errText = await response.text().catch(() => "")
+    console.error(
+      "Failed to save image to R2:",
+      response.status,
+      response.statusText,
+      errText
+    )
+    throw new Error(
+      `Failed to save image to R2: ${response.status} ${response.statusText}`
+    )
   }
 
   const data = (await response.json()) as {
@@ -275,8 +282,8 @@ export async function saveImagesToR2(imageUrls: string[]): Promise<string[]> {
       removePendingImage(imageUrl)
     } catch (error) {
       console.error("Failed to save image:", error)
-      // 失败时使用原始 URL，保留队列待下次自动补偿
-      savedImages.push(imageUrl)
+      // 失败：保留在 pending 队列，等待后续自动重试；不将外链加入已保存列表，避免“假结果”
+      // 注意：此处不调用 removePendingImage(imageUrl)
     }
   }
 

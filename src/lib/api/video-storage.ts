@@ -7,6 +7,12 @@ export interface R2Video {
   alreadyExists?: boolean
 }
 
+export interface ListVideosResponse {
+  videos: R2Video[]
+  truncated: boolean
+  cursor?: string
+}
+
 /**
  * 上传视频到 R2
  */
@@ -48,16 +54,36 @@ export async function uploadVideoToR2(
 /**
  * 获取 R2 视频列表
  */
-export async function listStoredVideos(): Promise<R2Video[]> {
-  const response = await fetch("/api/video/list-videos")
+export async function listStoredVideosPage(
+  limit: number = 100,
+  cursor?: string
+): Promise<ListVideosResponse> {
+  const params = new URLSearchParams()
+  if (limit) params.set("limit", String(limit))
+  if (cursor) params.set("cursor", cursor)
 
+  const response = await fetch(`/api/video/list-videos?${params.toString()}`)
   if (!response.ok) {
     const error = (await response.json()) as { message?: string }
     throw new Error(error.message || "Failed to list videos from R2")
   }
 
-  const result = (await response.json()) as { videos?: R2Video[] }
-  return result.videos || []
+  const result = (await response.json()) as {
+    videos?: R2Video[]
+    truncated?: boolean
+    cursor?: string
+  }
+
+  return {
+    videos: result.videos || [],
+    truncated: Boolean(result.truncated),
+    cursor: result.cursor,
+  }
+}
+
+export async function listStoredVideos(): Promise<R2Video[]> {
+  const { videos } = await listStoredVideosPage()
+  return videos
 }
 
 /**

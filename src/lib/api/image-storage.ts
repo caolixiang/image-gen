@@ -22,21 +22,21 @@ export interface ListImagesResponse {
 export async function listStoredImages(limit: number = 100): Promise<string[]> {
   try {
     const response = await fetch(`/api/list-images?limit=${limit}`)
-    
+
     if (!response.ok) {
       throw new Error(`Failed to list images: ${response.statusText}`)
     }
 
     const data: ListImagesResponse = await response.json()
-    
+
     if (!data.success) {
-      throw new Error('Failed to list images')
+      throw new Error("Failed to list images")
     }
 
     // 返回图片 URL 数组
-    return data.images.map(img => img.url)
+    return data.images.map((img) => img.url)
   } catch (error) {
-    console.error('Error listing stored images:', error)
+    console.error("Error listing stored images:", error)
     return []
   }
 }
@@ -44,25 +44,46 @@ export async function listStoredImages(limit: number = 100): Promise<string[]> {
 /**
  * 获取带详细信息的图片列表
  */
-export async function listStoredImagesDetailed(limit: number = 100): Promise<StoredImage[]> {
+export async function listStoredImagesDetailed(
+  limit: number = 100
+): Promise<StoredImage[]> {
   try {
     const response = await fetch(`/api/list-images?limit=${limit}`)
-    
+
     if (!response.ok) {
       throw new Error(`Failed to list images: ${response.statusText}`)
     }
 
     const data: ListImagesResponse = await response.json()
-    
+
     if (!data.success) {
-      throw new Error('Failed to list images')
+      throw new Error("Failed to list images")
     }
 
     return data.images
   } catch (error) {
-    console.error('Error listing stored images:', error)
+    console.error("Error listing stored images:", error)
     return []
   }
+}
+
+/**
+ * 分页获取图片列表（带 cursor）
+ */
+export async function listStoredImagesPage(
+  limit: number = 50,
+  cursor?: string
+): Promise<ListImagesResponse> {
+  const params = new URLSearchParams()
+  if (limit) params.set("limit", String(limit))
+  if (cursor) params.set("cursor", cursor)
+
+  const response = await fetch(`/api/list-images?${params.toString()}`)
+  if (!response.ok) {
+    throw new Error(`Failed to list images: ${response.statusText}`)
+  }
+  const data: ListImagesResponse = await response.json()
+  return data
 }
 
 /**
@@ -80,15 +101,15 @@ function extractKeyFromUrl(url: string): string | null {
 export async function deleteStoredImage(imageUrl: string): Promise<boolean> {
   try {
     const key = extractKeyFromUrl(imageUrl)
-    
+
     if (!key) {
-      throw new Error('Invalid image URL')
+      throw new Error("Invalid image URL")
     }
 
-    const response = await fetch('/api/delete-image', {
-      method: 'POST',
+    const response = await fetch("/api/delete-image", {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({ key }),
     })
@@ -97,13 +118,12 @@ export async function deleteStoredImage(imageUrl: string): Promise<boolean> {
       throw new Error(`Failed to delete image: ${response.statusText}`)
     }
 
-    const data = await response.json() as {
+    const data = (await response.json()) as {
       success: boolean
     }
     return data.success
   } catch (error) {
-    console.error('Error deleting image:', error)
+    console.error("Error deleting image:", error)
     return false
   }
 }
-

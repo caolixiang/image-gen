@@ -78,7 +78,9 @@ export const useImageStore = create<ImageState>()((set) => ({
   setPrompt: (prompt) => set({ prompt }),
   setModel: (model) => set({ model }),
   setLoading: (loading) => set({ loading }),
-  setGeneratedImages: (images) => set({ generatedImages: images }),
+  // 去重：避免重复展示（以 URL 为键，保留先出现的顺序）
+  setGeneratedImages: (images) =>
+    set({ generatedImages: Array.from(new Set(images)) }),
   setError: (error) => set({ error }),
   setReferenceImages: (images) => set({ referenceImages: images }),
   setLoadingStoredImages: (loading) => set({ loadingStoredImages: loading }),

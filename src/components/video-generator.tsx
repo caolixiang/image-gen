@@ -36,7 +36,7 @@ import {
 } from "@/lib/api/video-generation"
 import {
   uploadVideoToR2,
-  listStoredVideos,
+  listStoredVideosPage,
   deleteStoredVideo,
   type R2Video,
 } from "@/lib/api/video-storage"
@@ -97,6 +97,13 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     index: number
   } | null>(null)
 
+  // 分页状态（仅组件内）
+  const [videoNextCursor, setVideoNextCursor] = useState<string | undefined>(
+    undefined
+  )
+  const [videoHasMore, setVideoHasMore] = useState(false)
+  const [loadingMoreVideos, setLoadingMoreVideos] = useState(false)
+
   // 轮询定时器
   const pollingTimerRef = useRef<number | null>(null)
   const pollingErrorCountRef = useRef(0)
@@ -150,8 +157,10 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
   const loadStoredVideos = async () => {
     try {
       setLoadingStoredVideos(true)
-      const videos = await listStoredVideos()
-      setStoredVideos(videos)
+      const page = await listStoredVideosPage(100)
+      setStoredVideos(page.videos)
+      setVideoHasMore(page.truncated)
+      setVideoNextCursor(page.cursor)
     } catch (error) {
       console.error("Failed to load stored videos:", error)
       toast({
@@ -463,6 +472,27 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     }
   }
 
+  // 加载更多（分页）
+  const handleLoadMoreVideos = async () => {
+    if (!videoHasMore || loadingMoreVideos) return
+    try {
+      setLoadingMoreVideos(true)
+      const page = await listStoredVideosPage(100, videoNextCursor)
+      setStoredVideos([...storedVideos, ...page.videos])
+      setVideoHasMore(page.truncated)
+      setVideoNextCursor(page.cursor)
+    } catch (error) {
+      console.error("Failed to load more videos:", error)
+      toast({
+        title: "加载失败",
+        description: "无法加载更多视频",
+        variant: "destructive",
+      })
+    } finally {
+      setLoadingMoreVideos(false)
+    }
+  }
+
   const handleVideoClick = (video: R2Video) => {
     setSelectedVideo(video)
     setIsModalOpen(true)
@@ -751,135 +781,155 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
               </div>
             </div>
           ) : currentVideoUrl || storedVideos.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2 gap-6">
-              {/* 当前生成的视频 */}
-              {currentVideoUrl && (
-                <Card
-                  className="overflow-hidden group hover:shadow-lg transition-all duration-300 p-0 cursor-pointer"
-                  onClick={() => {
-                    setSelectedVideo({
-                      key: `videos/${currentTaskId}.mp4`,
-                      url: currentVideoUrl,
-                      uploaded: new Date().toISOString(),
-                      size: 0,
-                    })
-                    setIsModalOpen(true)
-                  }}
-                >
-                  <CardContent className="p-0">
-                    <div className="bg-muted relative h-64 w-full">
-                      <video
-                        className="w-full h-full object-cover"
-                        src={currentVideoUrl}
-                        muted
-                      />
-                      {/* 右上角按钮组 - 鼠标悬停时显示 */}
-                      <div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            const a = document.createElement("a")
-                            a.href = currentVideoUrl
-                            a.download = `video-${currentTaskId}.mp4`
-                            a.click()
-                          }}
-                          size="sm"
-                          className="h-8 w-8 p-0 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
-                        >
-                          <Download className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            // 创建一个临时的 R2Video 对象用于 Remix
-                            const tempVideo: R2Video = {
-                              key: `videos/${currentTaskId}.mp4`,
-                              url: currentVideoUrl,
-                              uploaded: new Date().toISOString(),
-                              size: 0,
-                              metadata: {
-                                taskId: currentTaskId,
-                              },
-                            }
-                            handleRemixClick(tempVideo)
-                          }}
-                          size="sm"
-                          className="h-8 w-8 p-0 bg-purple-600 hover:bg-purple-700 text-white shadow-lg"
-                        >
-                          <Sparkles className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setCurrentVideoUrl("")
-                          }}
-                          size="sm"
-                          className="h-8 w-8 p-0 bg-gray-600 hover:bg-gray-700 text-white shadow-lg"
-                        >
-                          <X className="w-4 h-4" />
-                        </Button>
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2 gap-6">
+                {/* 当前生成的视频 */}
+                {currentVideoUrl && (
+                  <Card
+                    className="overflow-hidden group hover:shadow-lg transition-all duration-300 p-0 cursor-pointer"
+                    onClick={() => {
+                      setSelectedVideo({
+                        key: `videos/${currentTaskId}.mp4`,
+                        url: currentVideoUrl,
+                        uploaded: new Date().toISOString(),
+                        size: 0,
+                      })
+                      setIsModalOpen(true)
+                    }}
+                  >
+                    <CardContent className="p-0">
+                      <div className="bg-muted relative h-64 w-full">
+                        <video
+                          className="w-full h-full object-cover"
+                          src={currentVideoUrl}
+                          muted
+                        />
+                        {/* 右上角按钮组 - 鼠标悬停时显示 */}
+                        <div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              const a = document.createElement("a")
+                              a.href = currentVideoUrl
+                              a.download = `video-${currentTaskId}.mp4`
+                              a.click()
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
+                          >
+                            <Download className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              // 创建一个临时的 R2Video 对象用于 Remix
+                              const tempVideo: R2Video = {
+                                key: `videos/${currentTaskId}.mp4`,
+                                url: currentVideoUrl,
+                                uploaded: new Date().toISOString(),
+                                size: 0,
+                                metadata: {
+                                  taskId: currentTaskId,
+                                },
+                              }
+                              handleRemixClick(tempVideo)
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0 bg-purple-600 hover:bg-purple-700 text-white shadow-lg"
+                          >
+                            <Sparkles className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setCurrentVideoUrl("")
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0 bg-gray-600 hover:bg-gray-700 text-white shadow-lg"
+                          >
+                            <X className="w-4 h-4" />
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
+                    </CardContent>
+                  </Card>
+                )}
 
-              {/* 已保存的视频 */}
-              {storedVideos.map((video, index) => (
-                <Card
-                  key={video.key}
-                  className="overflow-hidden group hover:shadow-lg transition-all duration-300 p-0 cursor-pointer"
-                  onClick={() => handleVideoClick(video)}
-                >
-                  <CardContent className="p-0">
-                    <div className="bg-muted relative h-64 w-full">
-                      <video
-                        className="w-full h-full object-cover"
-                        src={video.url}
-                        muted
-                      />
-                      {/* 右上角按钮组 - 鼠标悬停时显示 */}
-                      <div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            const a = document.createElement("a")
-                            a.href = video.url
-                            a.download =
-                              video.key.split("/").pop() || "video.mp4"
-                            a.click()
-                          }}
-                          size="sm"
-                          className="h-8 w-8 p-0 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
-                        >
-                          <Download className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleRemixClick(video)
-                          }}
-                          size="sm"
-                          className="h-8 w-8 p-0 bg-purple-600 hover:bg-purple-700 text-white shadow-lg"
-                        >
-                          <Sparkles className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleDeleteClick(video, index)
-                          }}
-                          size="sm"
-                          className="h-8 w-8 p-0 bg-red-600 hover:bg-red-700 text-white shadow-lg"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
+                {/* 已保存的视频 */}
+                {storedVideos.map((video, index) => (
+                  <Card
+                    key={video.key}
+                    className="overflow-hidden group hover:shadow-lg transition-all duration-300 p-0 cursor-pointer"
+                    onClick={() => handleVideoClick(video)}
+                  >
+                    <CardContent className="p-0">
+                      <div className="bg-muted relative h-64 w-full">
+                        <video
+                          className="w-full h-full object-cover"
+                          src={video.url}
+                          muted
+                        />
+                        {/* 右上角按钮组 - 鼠标悬停时显示 */}
+                        <div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              const a = document.createElement("a")
+                              a.href = video.url
+                              a.download =
+                                video.key.split("/").pop() || "video.mp4"
+                              a.click()
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
+                          >
+                            <Download className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleRemixClick(video)
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0 bg-purple-600 hover:bg-purple-700 text-white shadow-lg"
+                          >
+                            <Sparkles className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleDeleteClick(video, index)
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0 bg-red-600 hover:bg-red-700 text-white shadow-lg"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+              {videoHasMore && (
+                <div className="flex justify-center mt-4">
+                  <Button
+                    onClick={handleLoadMoreVideos}
+                    disabled={loadingMoreVideos}
+                    variant="outline"
+                  >
+                    {loadingMoreVideos ? (
+                      <span className="flex items-center">
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        加载中...
+                      </span>
+                    ) : (
+                      <>加载更多</>
+                    )}
+                  </Button>
+                </div>
+              )}
+            </>
           ) : (
             <div className="h-32 rounded-lg border-2 border-dashed border-border flex items-center justify-center bg-muted/20">
               <div className="text-center text-muted-foreground">

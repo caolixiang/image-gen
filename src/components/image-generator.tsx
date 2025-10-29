@@ -28,6 +28,7 @@ import {
   Zap,
   Sparkles,
   Trash2,
+  RotateCcw,
 } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
@@ -36,18 +37,20 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Progress } from "@/components/ui/progress"
 import { Slider } from "@/components/ui/slider"
 import {
   generateWithNanoBanana,
-  submitMidjourneyTask,
   fetchMidjourneyTaskStatus,
   saveImagesToR2,
 } from "@/lib/api/image-generation"
 import { proxyImageUrl } from "@/lib/proxy-image"
-import { listStoredImages, deleteStoredImage } from "@/lib/api/image-storage"
+import {
+  listStoredImagesPage,
+  deleteStoredImage,
+} from "@/lib/api/image-storage"
 import { useImageStore } from "@/store/image-store"
 import { useTaskStore } from "@/store/task-store"
+import { useJobQueue } from "@/store/job-queue"
 
 import { loadProvidersConfig } from "@/lib/storage"
 
@@ -84,11 +87,8 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     setGenerationCount,
     imageSize,
     setImageSize,
-    taskId,
     setTaskId,
-    taskStatus,
     setTaskStatus,
-    progress,
     setProgress,
     mjBotType,
     setMjBotType,
@@ -98,6 +98,21 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     setAspectRatio,
     setIsPolling,
   } = useImageStore()
+
+  // Job queue hooks (v1: image only)
+  const { jobs, enqueueImageJob, retryTimeoutJob, cancelTimeoutJob, init } =
+    useJobQueue()
+  useEffect(() => {
+    init()
+  }, [])
+
+  const inProgressImageJobs = jobs.filter(
+    (j) =>
+      j.kind === "image" &&
+      ["queued", "submitting", "processing", "saving", "timeout"].includes(
+        j.status
+      )
+  ) as any[]
 
   // Local UI state - 不需要持久化
   const [previewImage, setPreviewImage] = useState<string | null>(null)
@@ -111,13 +126,22 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
   const pollingTimerRef = useRef<number | null>(null)
   const pollingErrorCountRef = useRef(0)
 
+  // 分页状态（仅组件内）
+  const [imageNextCursor, setImageNextCursor] = useState<string | undefined>(
+    undefined
+  )
+  const [imageHasMore, setImageHasMore] = useState(false)
+  const [loadingMoreImages, setLoadingMoreImages] = useState(false)
+
   // 页面加载时从 R2 获取已生成的图片
   useEffect(() => {
     const loadStoredImages = async () => {
       try {
         setLoadingStoredImages(true)
-        const images = await listStoredImages(50) // 加载最近 50 张图片
-        setGeneratedImages(images)
+        const page = await listStoredImagesPage(50) // 首次加载 50 张
+        setGeneratedImages(page.images.map((img) => img.url))
+        setImageHasMore(page.truncated)
+        setImageNextCursor(page.cursor)
       } catch (error) {
         console.error("Failed to load stored images:", error)
       } finally {
@@ -186,7 +210,6 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
       try {
         console.log("🔄 轮询图片生成状态，taskId:", taskId)
         const result = await fetchMidjourneyTaskStatus(effectiveConfig, taskId)
-
         // 更新进度
         if (result.progress !== undefined) {
           setProgress(result.progress)
@@ -214,10 +237,19 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
             imageUrls = [result.imageUrl]
           }
 
-          if (imageUrls.length > 0) {
-            // 保存到 R2
-            const savedImages = await saveImagesToR2(imageUrls)
-            setGeneratedImages([...savedImages, ...generatedImages])
+          // 当该任务已由队列管理时，避免重复注入 UI（由队列统一保存并写入）
+          const isManagedByQueue = useJobQueue
+            .getState()
+            .jobs.some((j) => j.kind === "image" && j.taskId === taskId)
+
+          if (!isManagedByQueue && imageUrls.length > 0) {
+            try {
+              // 仅在不受队列管理的“历史任务恢复”场景下，执行保存并写入 UI
+              const savedImages = await saveImagesToR2(imageUrls)
+              setGeneratedImages([...savedImages, ...generatedImages])
+            } catch (e) {
+              console.error("保存历史任务图片失败:", e)
+            }
           }
           // 保存流程结束后再清除持久化任务
           useTaskStore.getState().setTask("image", null)
@@ -286,61 +318,16 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     setGeneratedImages([...savedImages, ...generatedImages])
   }
 
-  // Midjourney 生成处理
+  // Midjourney 生成处理（改为入队，占位 + 调度）
   const handleMidjourneyGeneration = async () => {
-    setProgress(0)
-    setTaskStatus("SUBMITTING")
-
-    // 处理 prompt：添加相关参数
-    let finalPrompt = prompt
-
-    // 如果是 NIJI bot，添加 --niji 参数
-    if (mjBotType === "NIJI_JOURNEY" && !prompt.includes("--niji")) {
-      finalPrompt = `${finalPrompt} --niji`
-    }
-
-    // 如果选择了比例，添加 --ar 参数
-    if (aspectRatio && !prompt.includes("--ar")) {
-      finalPrompt = `${finalPrompt} --ar ${aspectRatio}`
-    }
-
-    // 1. 提交任务
-    const id = await submitMidjourneyTask(config, {
-      prompt: finalPrompt,
-      base64Array: referenceImages,
-      botType: mjBotType,
-      modes: mjMode ? [mjMode] : undefined,
+    enqueueImageJob({
+      service: "midjourney",
+      prompt,
+      referenceImages,
+      mjBotType,
+      mjMode,
+      aspectRatio,
     })
-
-    setTaskId(id)
-    setTaskStatus("SUBMITTED")
-    setProgress(10)
-
-    // 写入持久化任务（记录提交时的 providerId）
-    const cfgAll = loadProvidersConfig()
-    useTaskStore.getState().setTask("image", id, cfgAll.selectedProviderId)
-
-    // 2. 使用新的轮询方式（setInterval）
-    console.log("🎬 开始轮询图片生成，taskId:", id)
-    startPollingWithTaskId(
-      id,
-      getPollingConfigForTask(cfgAll.selectedProviderId, config)
-    )
-  }
-
-  // 根据 providerId 生成用于轮询的配置
-  const getPollingConfigForTask = (
-    providerId: string | null,
-    fallback: { baseUrl: string; apiKey: string }
-  ): { baseUrl: string; apiKey: string } => {
-    if (!providerId) return fallback
-    const cfgAll = loadProvidersConfig()
-    const provider = cfgAll.providers.find(
-      (p) => p.id === providerId && p.apiKey
-    )
-    return provider
-      ? { baseUrl: provider.baseUrl, apiKey: provider.apiKey }
-      : fallback
   }
 
   // 主生成处理函数
@@ -355,24 +342,27 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
       return
     }
 
-    setLoading(true)
+    // 清理错误提示
     setError(null)
-    setTaskStatus("")
-    setProgress(0)
 
     try {
       if (serviceType === "nano-banana") {
+        // 同步生成，仍保留原有 loading 态
+        setLoading(true)
         await handleNanoBananaGeneration()
       } else {
+        // Midjourney 走队列，不再阻塞 UI
         await handleMidjourneyGeneration()
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "生成失败")
       console.error("Image generation error:", err)
     } finally {
-      setLoading(false)
-      setTaskStatus("")
-      setProgress(0)
+      if (serviceType === "nano-banana") {
+        setLoading(false)
+        setTaskStatus("")
+        setProgress(0)
+      }
     }
   }
 
@@ -433,6 +423,25 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     } catch (error) {
       console.error("删除失败:", error)
       alert("删除失败，请重试")
+    }
+  }
+
+  // 加载更多（分页）
+  const handleLoadMoreImages = async () => {
+    if (!imageHasMore || loadingMoreImages) return
+    try {
+      setLoadingMoreImages(true)
+      const page = await listStoredImagesPage(50, imageNextCursor)
+      setGeneratedImages([
+        ...generatedImages,
+        ...page.images.map((img) => img.url),
+      ])
+      setImageHasMore(page.truncated)
+      setImageNextCursor(page.cursor)
+    } catch (error) {
+      console.error("Failed to load more images:", error)
+    } finally {
+      setLoadingMoreImages(false)
     }
   }
 
@@ -725,46 +734,16 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
             </Alert>
           )}
 
-          {/* Progress display for Midjourney */}
-          {loading && serviceType === "midjourney" && taskStatus && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">生成进度</span>
-                <span className="font-medium">
-                  {taskStatus === "SUBMITTING" && "提交中..."}
-                  {taskStatus === "SUBMITTED" && "已提交"}
-                  {taskStatus === "PROCESSING" && "生成中..."}
-                  {taskStatus === "SUCCESS" && "完成"}
-                  {![
-                    "SUBMITTING",
-                    "SUBMITTED",
-                    "PROCESSING",
-                    "SUCCESS",
-                  ].includes(taskStatus) && taskStatus}
-                </span>
-              </div>
-              <Progress
-                value={progress}
-                className="h-2"
-              />
-              {taskId && (
-                <p className="text-xs text-muted-foreground">
-                  任务 ID: {taskId}
-                </p>
-              )}
-            </div>
-          )}
-
           <Button
             onClick={handleGenerate}
-            disabled={loading}
+            disabled={serviceType === "nano-banana" && loading}
             className="w-full"
             size="lg"
           >
-            {loading ? (
+            {serviceType === "nano-banana" && loading ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                {serviceType === "midjourney" ? "生成中..." : "生成中..."}
+                生成中...
               </>
             ) : (
               <>
@@ -788,6 +767,60 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
           </CardDescription>
         </CardHeader>
         <CardContent className="p-4">
+          {inProgressImageJobs.length > 0 && (
+            <div className="mb-4 space-y-3">
+              <div className="text-sm text-muted-foreground">
+                进行中的任务（占位）
+              </div>
+              <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                {inProgressImageJobs.map((job) => (
+                  <div
+                    key={job.id}
+                    className="border rounded-lg p-3 bg-muted/30"
+                  >
+                    <div className="flex items-center justify-between text-xs mb-2">
+                      <span className="font-medium">
+                        {job.status === "queued" && "排队中"}
+                        {job.status === "submitting" && "提交中"}
+                        {job.status === "processing" && "生成中"}
+                        {job.status === "saving" && "保存中"}
+                        {job.status === "timeout" && "超时"}
+                      </span>
+                      {job.status === "timeout" && (
+                        <div className="flex items-center gap-1">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            title="重试轮询"
+                            onClick={() => retryTimeoutJob(job.id)}
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            title="取消并移除"
+                            onClick={() => cancelTimeoutJob(job.id)}
+                          >
+                            <X className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="h-2 w-full rounded bg-muted overflow-hidden">
+                      <div
+                        className="h-2 bg-primary transition-all"
+                        style={{
+                          width: `${Math.min(100, job.progress || 0)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {loadingStoredImages ? (
             <div className="flex items-center justify-center py-6">
               <div className="text-center space-y-2">
@@ -798,51 +831,71 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
               </div>
             </div>
           ) : generatedImages.length > 0 ? (
-            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-              {generatedImages.map((image, index) => (
-                <Card
-                  key={index}
-                  className="overflow-hidden group hover:shadow-lg transition-all duration-300 p-0"
-                >
-                  <CardContent className="p-0">
-                    <div
-                      className="relative aspect-square bg-muted cursor-pointer overflow-hidden"
-                      onClick={() => setPreviewImage(image)}
-                    >
-                      <img
-                        src={proxyImageUrl(image || "/placeholder.svg")}
-                        alt={`Generated ${index + 1}`}
-                        className="w-full h-full object-cover rounded-t-lg transition-transform duration-300 group-hover:scale-105"
-                      />
-                      <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors duration-300" />
-                      {/* 右上角按钮组 - 鼠标悬停时显示 */}
-                      <div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleDownload(image, index)
-                          }}
-                          size="sm"
-                          className="h-8 w-8 p-0 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
-                        >
-                          <Download className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleDeleteClick(image, index)
-                          }}
-                          size="sm"
-                          className="h-8 w-8 p-0 bg-red-600 hover:bg-red-700 text-white shadow-lg"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
+            <>
+              <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                {generatedImages.map((image, index) => (
+                  <Card
+                    key={index}
+                    className="overflow-hidden group hover:shadow-lg transition-all duration-300 p-0"
+                  >
+                    <CardContent className="p-0">
+                      <div
+                        className="relative aspect-square bg-muted cursor-pointer overflow-hidden"
+                        onClick={() => setPreviewImage(image)}
+                      >
+                        <img
+                          src={proxyImageUrl(image || "/placeholder.svg")}
+                          alt={`Generated ${index + 1}`}
+                          className="w-full h-full object-cover rounded-t-lg transition-transform duration-300 group-hover:scale-105"
+                        />
+                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors duration-300" />
+                        {/* 右上角按钮组 - 鼠标悬停时显示 */}
+                        <div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleDownload(image, index)
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
+                          >
+                            <Download className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleDeleteClick(image, index)
+                            }}
+                            size="sm"
+                            className="h-8 w-8 p-0 bg-red-600 hover:bg-red-700 text-white shadow-lg"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+              {imageHasMore && (
+                <div className="flex justify-center mt-4">
+                  <Button
+                    onClick={handleLoadMoreImages}
+                    disabled={loadingMoreImages}
+                    variant="outline"
+                  >
+                    {loadingMoreImages ? (
+                      <span className="flex items-center">
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        加载中...
+                      </span>
+                    ) : (
+                      <>加载更多</>
+                    )}
+                  </Button>
+                </div>
+              )}
+            </>
           ) : (
             <div className="h-32 rounded-lg border-2 border-dashed border-border flex items-center justify-center bg-muted/20">
               <div className="text-center text-muted-foreground">
@@ -879,6 +932,7 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
               确认删除图片
             </DialogTitle>
           </DialogHeader>
+
           <div className="space-y-4 pt-4">
             <p className="text-sm text-muted-foreground">
               确定要删除这张图片吗？此操作无法撤销。
