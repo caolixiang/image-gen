@@ -25,6 +25,9 @@ import {
   fetchMidjourneyDescribeResult,
 } from "@/lib/api/image-description"
 import { useDescribeStore } from "@/store/describe-store"
+import { useTaskStore } from "@/store/task-store"
+
+import { loadProvidersConfig } from "@/lib/storage"
 
 interface ImageDescriberProps {
   config: {
@@ -36,38 +39,66 @@ interface ImageDescriberProps {
 export function ImageDescriber({ config }: ImageDescriberProps) {
   // Zustand store - 持久化状态
   const {
-    previewUrl, setPreviewUrl,
-    description, setDescription,
-    isAnalyzing, setIsAnalyzing,
-    taskId, setTaskId,
+    previewUrl,
+    setPreviewUrl,
+    description,
+    setDescription,
+    isAnalyzing,
+    setIsAnalyzing,
+    taskId,
+    setTaskId,
     setIsPolling,
   } = useDescribeStore()
-  
+
   // Local UI state - 不需要持久化
   const [error, setError] = useState<string | null>(null)
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
   const [taskStatus, setTaskStatus] = useState<string>("")
   const [progress, setProgress] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  
+
   // 轮询定时器
   const pollingTimerRef = useRef<number | null>(null)
   const pollingErrorCountRef = useRef(0)
 
+  const getPollingConfigForTask = (
+    providerId: string | null,
+    fallback: { baseUrl: string; apiKey: string }
+  ): { baseUrl: string; apiKey: string } => {
+    if (!providerId) return fallback
+    const cfgAll = loadProvidersConfig()
+    const provider = cfgAll.providers.find(
+      (p) => p.id === providerId && p.apiKey
+    )
+    return provider
+      ? { baseUrl: provider.baseUrl, apiKey: provider.apiKey }
+      : fallback
+  }
+
   // 解析描述，分割成 4 段
   const parseDescriptions = (text: string): string[] => {
     const regex = /[1-4]️⃣\s*/g
-    const parts = text.split(regex).filter(part => part.trim())
+    const parts = text.split(regex).filter((part) => part.trim())
     return parts.length > 0 ? parts : []
   }
 
   const descriptions = description ? parseDescriptions(description) : []
 
-  // 恢复轮询
+  // 恢复轮询（从持久化任务存储恢复）
   useEffect(() => {
-    if (taskId && isAnalyzing && !pollingTimerRef.current) {
-      console.log('🔄 检测到未完成的描述任务，恢复轮询:', taskId)
-      startPollingWithTaskId(taskId)
+    const { describeTaskId, describeProviderId } = useTaskStore.getState()
+    if (describeTaskId && !pollingTimerRef.current) {
+      console.log(
+        "🔄 检测到未完成的描述任务，恢复轮询:",
+        describeTaskId,
+        "provider:",
+        describeProviderId
+      )
+      setIsAnalyzing(true)
+      setTaskId(describeTaskId)
+      setTaskStatus("PROCESSING")
+      const resumeConfig = getPollingConfigForTask(describeProviderId, config)
+      startPollingWithTaskId(describeTaskId, resumeConfig)
     }
   }, [])
 
@@ -81,18 +112,26 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
   }, [])
 
   // 轮询函数
-  const startPollingWithTaskId = (taskId: string) => {
+  const startPollingWithTaskId = (
+    taskId: string,
+    overrideConfig?: { baseUrl: string; apiKey: string }
+  ) => {
     if (pollingTimerRef.current) {
       clearInterval(pollingTimerRef.current)
     }
+
+    const effectiveConfig = overrideConfig ?? config
 
     setIsPolling(true)
     pollingErrorCountRef.current = 0
 
     pollingTimerRef.current = setInterval(async () => {
       try {
-        console.log('🔄 轮询描述任务状态，taskId:', taskId)
-        const result = await fetchMidjourneyDescribeResult(config, taskId)
+        console.log("🔄 轮询描述任务状态，taskId:", taskId)
+        const result = await fetchMidjourneyDescribeResult(
+          effectiveConfig,
+          taskId
+        )
 
         // 更新进度
         if (result.progress !== undefined) {
@@ -109,9 +148,12 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
           setIsPolling(false)
           setIsAnalyzing(false)
           setProgress(100)
-          
+
+          // 任务完成清除持久化记录
+          useTaskStore.getState().setTask("describe", null)
+
           if (result.prompt) {
-            console.log('✅ 图片描述完成')
+            console.log("✅ 图片描述完成")
             setDescription(result.prompt)
           } else {
             setError("未能获取到描述内容")
@@ -127,22 +169,30 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
           setIsAnalyzing(false)
           setProgress(0)
           setError("描述生成失败")
+
+          // 失败清除持久化记录
+          useTaskStore.getState().setTask("describe", null)
         }
       } catch (error: any) {
         pollingErrorCountRef.current++
-        console.error('❌ 轮询错误:', error)
-        
+        console.error("❌ 轮询错误:", error)
+
         if (pollingErrorCountRef.current >= 3) {
+          // 重置并延时重试，直到任务成功/失败
+          pollingErrorCountRef.current = 0
           if (pollingTimerRef.current) {
             clearInterval(pollingTimerRef.current)
             pollingTimerRef.current = null
           }
-          setIsPolling(false)
-          setIsAnalyzing(false)
-          setError(error.message || "查询任务状态失败")
+          const errorMsg = error.message || "查询任务状态失败"
+          console.warn("轮询连续出错，5 秒后重试…", errorMsg)
+          setTimeout(
+            () => startPollingWithTaskId(taskId, effectiveConfig),
+            5000
+          )
         }
       }
-    }, 3000) // 每 3 秒轮询一次
+    }, 5000) // 每 5 秒轮询一次
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -151,7 +201,7 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
       const reader = new FileReader()
       reader.onload = (e) => {
         setPreviewUrl(e.target?.result as string)
-        setDescription('')
+        setDescription("")
         setError(null)
       }
       reader.readAsDataURL(file)
@@ -173,7 +223,7 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
     setError(null)
     setTaskStatus("")
     setProgress(0)
-    setDescription('')
+    setDescription("")
 
     try {
       // 1. 提交 Describe 任务
@@ -186,9 +236,16 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
       setTaskStatus("SUBMITTED")
       setProgress(10)
 
-      // 2. 使用新的轮询方式（setInterval）
-      console.log('🎬 开始轮询图片描述，taskId:', id)
-      startPollingWithTaskId(id)
+      // 写入持久化任务（记录 providerId）
+      const cfgAll = loadProvidersConfig()
+      useTaskStore.getState().setTask("describe", id, cfgAll.selectedProviderId)
+
+      // 2. 使用提交时的 provider 配置开始轮询
+      console.log("🎬 开始轮询图片描述，taskId:", id)
+      startPollingWithTaskId(
+        id,
+        getPollingConfigForTask(cfgAll.selectedProviderId, config)
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : "描述生成失败")
       console.error("Image description error:", err)
@@ -228,11 +285,11 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
     if (files && files.length > 0) {
       const file = files[0]
       // 检查是否为图片
-      if (file.type.startsWith('image/')) {
+      if (file.type.startsWith("image/")) {
         const reader = new FileReader()
         reader.onloadend = () => {
           setPreviewUrl(reader.result as string)
-          setDescription('')
+          setDescription("")
           setError(null)
         }
         reader.readAsDataURL(file)
@@ -243,8 +300,8 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
   }
 
   const removeImage = () => {
-    setPreviewUrl('')
-    setDescription('')
+    setPreviewUrl("")
+    setDescription("")
     setError(null)
     if (fileInputRef.current) {
       fileInputRef.current.value = ""
@@ -302,8 +359,12 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
                   <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-3">
                     <Upload className="w-8 h-8 text-primary" />
                   </div>
-                  <p className="text-sm font-medium text-foreground">点击或拖拽图片到此处</p>
-                  <p className="text-xs text-muted-foreground mt-1">支持 JPG、PNG 格式</p>
+                  <p className="text-sm font-medium text-foreground">
+                    点击或拖拽图片到此处
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    支持 JPG、PNG 格式
+                  </p>
                 </div>
               )}
             </CardContent>
@@ -370,13 +431,18 @@ export function ImageDescriber({ config }: ImageDescriberProps) {
       <Card>
         <CardHeader>
           <CardTitle>生成的提示词</CardTitle>
-          <CardDescription>AI 为您的图片生成的 {descriptions.length} 个详细描述</CardDescription>
+          <CardDescription>
+            AI 为您的图片生成的 {descriptions.length} 个详细描述
+          </CardDescription>
         </CardHeader>
         <CardContent className="p-4">
           {descriptions.length > 0 ? (
             <div className="space-y-3">
               {descriptions.map((desc, index) => (
-                <Card key={index} className="border-2">
+                <Card
+                  key={index}
+                  className="border-2"
+                >
                   <CardContent className="p-3 space-y-2">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">

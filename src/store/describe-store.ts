@@ -1,5 +1,4 @@
-import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
+import { create } from "zustand"
 
 interface DescribeState {
   // Image Describer
@@ -9,7 +8,7 @@ interface DescribeState {
   isAnalyzing: boolean
   taskId: string
   isPolling: boolean
-  
+
   // Actions
   setSelectedFile: (file: File | null) => void
   setPreviewUrl: (url: string) => void
@@ -20,40 +19,29 @@ interface DescribeState {
   resetDescriber: () => void
 }
 
-export const useDescribeStore = create<DescribeState>()(
-  persist(
-    (set) => ({
-      // Initial state
-      selectedFile: null,
-      previewUrl: '',
-      description: '',
-      isAnalyzing: false,
-      taskId: '',
-      isPolling: false,
-      
-      // Actions
-      setSelectedFile: (file) => set({ selectedFile: file }),
-      setPreviewUrl: (url) => set({ previewUrl: url }),
-      setDescription: (description) => set({ description }),
-      setIsAnalyzing: (isAnalyzing) => set({ isAnalyzing }),
-      setTaskId: (taskId) => set({ taskId }),
-      setIsPolling: (isPolling) => set({ isPolling }),
-      resetDescriber: () => set({ 
-        selectedFile: null, 
-        previewUrl: '', 
-        description: '', 
-        isAnalyzing: false,
-        taskId: '',
-        isPolling: false
-      }),
-    }),
-    {
-      name: 'image-describer-storage',
-      partialize: (state) => ({
-        // 只持久化描述文本，不持久化文件和 URL（这些无法序列化）
-        description: state.description,
-      }),
-    }
-  )
-)
+export const useDescribeStore = create<DescribeState>()((set) => ({
+  // Initial state
+  selectedFile: null,
+  previewUrl: "",
+  description: "",
+  isAnalyzing: false,
+  taskId: "",
+  isPolling: false,
 
+  // Actions
+  setSelectedFile: (file) => set({ selectedFile: file }),
+  setPreviewUrl: (url) => set({ previewUrl: url }),
+  setDescription: (description) => set({ description }),
+  setIsAnalyzing: (isAnalyzing) => set({ isAnalyzing }),
+  setTaskId: (taskId) => set({ taskId }),
+  setIsPolling: (isPolling) => set({ isPolling }),
+  resetDescriber: () =>
+    set({
+      selectedFile: null,
+      previewUrl: "",
+      description: "",
+      isAnalyzing: false,
+      taskId: "",
+      isPolling: false,
+    }),
+}))

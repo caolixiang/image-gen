@@ -3,16 +3,46 @@
 import type React from "react"
 
 import { useState, useRef, useEffect } from "react"
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Upload, Video, X, Loader2, Download, Trash2, Sparkles } from "lucide-react"
-import { generateVideo, getVideoStatus, remixVideo, type VideoGenerationParams } from "@/lib/api/video-generation"
-import { uploadVideoToR2, listStoredVideos, deleteStoredVideo, type R2Video } from "@/lib/api/video-storage"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  Upload,
+  Video,
+  X,
+  Loader2,
+  Download,
+  Trash2,
+  Sparkles,
+} from "lucide-react"
+import {
+  generateVideo,
+  getVideoStatus,
+  remixVideo,
+  type VideoGenerationParams,
+} from "@/lib/api/video-generation"
+import {
+  uploadVideoToR2,
+  listStoredVideos,
+  deleteStoredVideo,
+  type R2Video,
+} from "@/lib/api/video-storage"
 import { useToast } from "@/hooks/use-toast"
 import { useVideoStore } from "@/store/video-store"
+import { useTaskStore } from "@/store/task-store"
 
 interface VideoGeneratorProps {
   config: {
@@ -21,25 +51,38 @@ interface VideoGeneratorProps {
   }
 }
 
+import { loadProvidersConfig } from "@/lib/storage"
+
 export function VideoGenerator({ config }: VideoGeneratorProps) {
   const { toast } = useToast()
   const fileInputRef = useRef<HTMLInputElement>(null)
-  
+
   // Zustand store - 持久化状态
   const {
-    description, setDescription,
-    aspectRatio, setAspectRatio,
-    duration, setDuration,
-    isGenerating, setIsGenerating,
-    progress, setProgress,
-    statusText, setStatusText,
-    currentVideoUrl, setCurrentVideoUrl,
-    currentTaskId, setCurrentTaskId,
-    storedVideos, setStoredVideos,
-    loadingStoredVideos, setLoadingStoredVideos,
-    isPolling, setIsPolling,
+    description,
+    setDescription,
+    aspectRatio,
+    setAspectRatio,
+    duration,
+    setDuration,
+    isGenerating,
+    setIsGenerating,
+    progress,
+    setProgress,
+    statusText,
+    setStatusText,
+    currentVideoUrl,
+    setCurrentVideoUrl,
+    currentTaskId,
+    setCurrentTaskId,
+    storedVideos,
+    setStoredVideos,
+    loadingStoredVideos,
+    setLoadingStoredVideos,
+    isPolling,
+    setIsPolling,
   } = useVideoStore()
-  
+
   // Local UI state - 不需要持久化
   const [referenceImage, setReferenceImage] = useState<string | null>(null)
   const [imageFile, setImageFile] = useState<File | null>(null)
@@ -49,11 +92,28 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
   const [remixPrompt, setRemixPrompt] = useState("")
   const [remixingVideo, setRemixingVideo] = useState<R2Video | null>(null)
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
-  const [deletingVideo, setDeletingVideo] = useState<{ video: R2Video; index: number } | null>(null)
-  
+  const [deletingVideo, setDeletingVideo] = useState<{
+    video: R2Video
+    index: number
+  } | null>(null)
+
   // 轮询定时器
   const pollingTimerRef = useRef<number | null>(null)
   const pollingErrorCountRef = useRef(0)
+
+  const getPollingConfigForTask = (
+    providerId: string | null,
+    fallback: { baseUrl: string; apiKey: string }
+  ): { baseUrl: string; apiKey: string } => {
+    if (!providerId) return fallback
+    const cfgAll = loadProvidersConfig()
+    const provider = cfgAll.providers.find(
+      (p) => p.id === providerId && p.apiKey
+    )
+    return provider
+      ? { baseUrl: provider.baseUrl, apiKey: provider.apiKey }
+      : fallback
+  }
 
   // 页面加载时获取已存储的视频
   useEffect(() => {
@@ -61,11 +121,20 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     if (storedVideos.length === 0 && !loadingStoredVideos) {
       loadStoredVideos()
     }
-    
-    // 如果有正在进行的任务，恢复轮询
-    if (currentTaskId && isGenerating && !pollingTimerRef.current) {
-      console.log('🔄 检测到未完成的任务，恢复轮询:', currentTaskId)
-      startPollingWithTaskId(currentTaskId)
+
+    // 如果有正在进行的任务，恢复轮询（从持久化任务存储恢复，使用提交时的 provider 配置）
+    const { videoTaskId, videoProviderId } = useTaskStore.getState()
+    if (videoTaskId && !pollingTimerRef.current) {
+      console.log(
+        "🔄 检测到未完成的视频任务，恢复轮询:",
+        videoTaskId,
+        "provider:",
+        videoProviderId
+      )
+      setIsGenerating(true)
+      setCurrentTaskId(videoTaskId)
+      const resumeConfig = getPollingConfigForTask(videoProviderId, config)
+      startPollingWithTaskId(videoTaskId, resumeConfig)
     }
   }, [])
 
@@ -139,7 +208,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     if (files && files.length > 0) {
       const file = files[0]
       // 检查文件类型
-      if (file.type === 'image/jpeg' || file.type === 'image/png') {
+      if (file.type === "image/jpeg" || file.type === "image/png") {
         setImageFile(file)
         const reader = new FileReader()
         reader.onloadend = () => {
@@ -206,14 +275,23 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
 
       const task = await generateVideo(config.baseUrl, config.apiKey, params)
 
-      console.log('🎬 视频生成任务返回:', task)
-      console.log('🎬 Task ID:', task.id)
-      
+      console.log("🎬 视频生成任务返回:", task)
+      console.log("🎬 Task ID:", task.id)
+
       setCurrentTaskId(task.id)
       setStatusText("任务已提交，正在生成视频...")
-      
-      // 直接使用 task.id 开始轮询，避免状态更新延迟
-      startPollingWithTaskId(task.id)
+
+      // 写入持久化任务（记录 providerId）
+      const cfgAll = loadProvidersConfig()
+      useTaskStore
+        .getState()
+        .setTask("video", task.id, cfgAll.selectedProviderId)
+
+      // 使用提交时的 provider 配置开始轮询
+      startPollingWithTaskId(
+        task.id,
+        getPollingConfigForTask(cfgAll.selectedProviderId, config)
+      )
     } catch (error: any) {
       setIsGenerating(false)
       setProgress(0)
@@ -239,18 +317,27 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     }
   }
 
-  const startPollingWithTaskId = (taskId: string) => {
+  const startPollingWithTaskId = (
+    taskId: string,
+    overrideConfig?: { baseUrl: string; apiKey: string }
+  ) => {
     if (pollingTimerRef.current) {
       clearInterval(pollingTimerRef.current)
     }
+    const effectiveConfig = overrideConfig ?? config
 
-    setIsPolling(true)  // 标记开始轮询
+    setIsPolling(true) // 标记开始轮询
     pollingTimerRef.current = setInterval(async () => {
       try {
-        console.log('🔄 开始轮询，taskId:', taskId)
-        const task = await getVideoStatus(config.baseUrl, config.apiKey, taskId)
+        console.log("🔄 开始轮询，taskId:", taskId)
+        const task = await getVideoStatus(
+          effectiveConfig.baseUrl,
+          effectiveConfig.apiKey,
+          taskId
+        )
 
-        const taskProgress = typeof task.progress === "number" ? task.progress : 0
+        const taskProgress =
+          typeof task.progress === "number" ? task.progress : 0
         setProgress(Math.max(10, Math.min(100, taskProgress)))
 
         if (task.status === "completed") {
@@ -259,16 +346,19 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
             clearInterval(pollingTimerRef.current)
             pollingTimerRef.current = null
           }
-          setIsPolling(false)  // 标记停止轮询
+          // 清除持久化任务
+          useTaskStore.getState().setTask("video", null)
+
+          setIsPolling(false) // 标记停止轮询
           setIsGenerating(false)
           setProgress(100)
           setStatusText("视频生成完成！")
 
           // 设置视频 URL 用于预览
           if (task.video_url) {
-            console.log('🎬 视频生成完成，URL:', task.video_url)
+            console.log("🎬 视频生成完成，URL:", task.video_url)
             setCurrentVideoUrl(task.video_url)
-            
+
             // 自动保存到 R2
             try {
               const result = await uploadVideoToR2(
@@ -308,7 +398,10 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
             clearInterval(pollingTimerRef.current)
             pollingTimerRef.current = null
           }
-          setIsPolling(false)  // 标记停止轮询
+          // 清除持久化任务
+          useTaskStore.getState().setTask("video", null)
+
+          setIsPolling(false) // 标记停止轮询
           setIsGenerating(false)
           setProgress(0)
           setStatusText("视频生成失败")
@@ -325,27 +418,23 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
       } catch (error: any) {
         pollingErrorCountRef.current++
         if (pollingErrorCountRef.current >= 3) {
-          // 立即清除定时器，停止轮询
+          // 重置并延时重试，直到任务成功/失败
+          pollingErrorCountRef.current = 0
           if (pollingTimerRef.current) {
             clearInterval(pollingTimerRef.current)
             pollingTimerRef.current = null
           }
-          setIsPolling(false)  // 标记停止轮询
-          setIsGenerating(false)
           const errorMsg =
             error.response?.data?.message || error.message || "查询视频状态失败"
-
-          toast({
-            title: "查询失败",
-            description: `${errorMsg}，请检查 API Key 是否正确`,
-            variant: "destructive",
-          })
+          console.warn("轮询连续出错，5 秒后重试…", errorMsg)
+          setTimeout(
+            () => startPollingWithTaskId(taskId, effectiveConfig),
+            5000
+          )
         }
       }
-    }, 3000)
+    }, 5000)
   }
-
-
 
   const handleDeleteClick = (video: R2Video, index: number) => {
     setDeletingVideo({ video, index })
@@ -402,40 +491,50 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
 
       // 从 R2Video 的 metadata 中获取 taskId，如果没有则从文件名提取
       let taskId = remixingVideo.metadata?.taskId
-      
+
       if (!taskId) {
         // 从文件名提取：videos/1761507295048-sora-2:task_01k8gzyem5e3fbt38yvtpkta6g.mp4
-        const filename = remixingVideo.key.replace('videos/', '').replace('.mp4', '')
+        const filename = remixingVideo.key
+          .replace("videos/", "")
+          .replace(".mp4", "")
         // 移除时间戳前缀，保留 sora-xxx 部分
-        const parts = filename.split('-')
+        const parts = filename.split("-")
         if (parts.length >= 2) {
           // 移除第一个时间戳部分，重新组合剩余部分
-          taskId = parts.slice(1).join('-')
+          taskId = parts.slice(1).join("-")
         }
       }
-      
-      console.log('🎬 Remix 调试信息:', {
+
+      console.log("🎬 Remix 调试信息:", {
         videoKey: remixingVideo.key,
         metadata: remixingVideo.metadata,
-        extractedTaskId: taskId
+        extractedTaskId: taskId,
       })
-      
+
       if (!taskId) {
-        throw new Error('无法获取视频的原始任务 ID')
+        throw new Error("无法获取视频的原始任务 ID")
       }
 
-      console.log('🎬 使用 taskId 进行 Remix:', taskId)
-      
+      console.log("🎬 使用 taskId 进行 Remix:", taskId)
+
       const task = await remixVideo(config.baseUrl, config.apiKey, taskId, {
-        prompt: remixPrompt
+        prompt: remixPrompt,
       })
 
-      console.log('🎬 Remix 任务返回:', task)
-      console.log('🎬 Task ID:', task.id)
+      console.log("🎬 Remix 任务返回:", task)
+      console.log("🎬 Task ID:", task.id)
 
       setCurrentTaskId(task.id)
       setStatusText("任务已提交，正在生成视频...")
-      startPollingWithTaskId(task.id)
+      // 记录 remix 任务到持久化并按提交时 provider 轮询
+      const cfgAll = loadProvidersConfig()
+      useTaskStore
+        .getState()
+        .setTask("video", task.id, cfgAll.selectedProviderId)
+      startPollingWithTaskId(
+        task.id,
+        getPollingConfigForTask(cfgAll.selectedProviderId, config)
+      )
     } catch (error: any) {
       setIsGenerating(false)
       toast({
@@ -463,67 +562,72 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
       <Card>
         <CardHeader>
           <CardTitle>视频生成</CardTitle>
-          <CardDescription>
-            使用 AI 生成视频，可选参考图片
-          </CardDescription>
+          <CardDescription>使用 AI 生成视频，可选参考图片</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <Card className="border-2 border-dashed border-muted-foreground/25 bg-muted/30 hover:border-primary/50 transition-colors">
             <CardContent className="p-4">
-            <input
-              type="file"
-              id="video-image-upload"
-              ref={fileInputRef}
-              className="hidden"
-              accept="image/jpeg,image/png"
-              onChange={handleImageUpload}
-            />
-            <label
-              htmlFor="video-image-upload"
-              className="flex flex-col items-center justify-center cursor-pointer h-48"
-              onDragOver={handleDragOver}
-              onDragEnter={handleDragEnter}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-            >
-              {referenceImage ? (
-                <div className="flex justify-center">
-                  <div className="relative">
-                    <img
-                      src={referenceImage}
-                      alt="Reference"
-                      className="w-48 h-48 object-cover rounded-lg"
-                    />
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="absolute top-1 right-1 h-7 w-7 bg-black/70 hover:bg-black/90 text-white"
-                      onClick={(e) => {
-                        e.preventDefault()
-                        removeImage()
-                      }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+              <input
+                type="file"
+                id="video-image-upload"
+                ref={fileInputRef}
+                className="hidden"
+                accept="image/jpeg,image/png"
+                onChange={handleImageUpload}
+              />
+              <label
+                htmlFor="video-image-upload"
+                className="flex flex-col items-center justify-center cursor-pointer h-48"
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+              >
+                {referenceImage ? (
+                  <div className="flex justify-center">
+                    <div className="relative">
+                      <img
+                        src={referenceImage}
+                        alt="Reference"
+                        className="w-48 h-48 object-cover rounded-lg"
+                      />
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="absolute top-1 right-1 h-7 w-7 bg-black/70 hover:bg-black/90 text-white"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          removeImage()
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </div>
-                </div>
-              ) : (
-                <>
-                  <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
-                    <Upload className="w-8 h-8 text-primary" />
-                  </div>
-                  <div className="text-center space-y-1 mt-3">
-                    <p className="text-sm font-medium">点击或拖拽图片到此处</p>
-                    <p className="text-xs text-muted-foreground">支持 JPG、PNG 格式</p>
-                  </div>
-                </>
-              )}
-            </label>
+                ) : (
+                  <>
+                    <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
+                      <Upload className="w-8 h-8 text-primary" />
+                    </div>
+                    <div className="text-center space-y-1 mt-3">
+                      <p className="text-sm font-medium">
+                        点击或拖拽图片到此处
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        支持 JPG、PNG 格式
+                      </p>
+                    </div>
+                  </>
+                )}
+              </label>
             </CardContent>
           </Card>
 
           <div className="space-y-2">
-            <Label htmlFor="video-description" className="text-sm font-medium">
+            <Label
+              htmlFor="video-description"
+              className="text-sm font-medium"
+            >
               视频描述
             </Label>
             <Textarea
@@ -532,9 +636,11 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               className="min-h-20 resize-none"
-              maxLength={2000}
+              maxLength={6000}
             />
-            <div className="text-xs text-muted-foreground text-right">{description.length}/2000 字符</div>
+            <div className="text-xs text-muted-foreground text-right">
+              {description.length}/6000 字符
+            </div>
           </div>
 
           <div className="space-y-3">
@@ -544,7 +650,9 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                 {aspectRatios.map((ratio) => (
                   <Button
                     key={ratio.value}
-                    variant={aspectRatio === ratio.value ? "default" : "outline"}
+                    variant={
+                      aspectRatio === ratio.value ? "default" : "outline"
+                    }
                     size="sm"
                     onClick={() => setAspectRatio(ratio.value)}
                     className="flex-1 h-8 text-xs"
@@ -601,7 +709,9 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                   style={{ width: `${progress}%` }}
                 />
               </div>
-              <p className="text-xs text-muted-foreground text-center">{statusText}</p>
+              <p className="text-xs text-muted-foreground text-center">
+                {statusText}
+              </p>
             </div>
           )}
         </CardContent>
@@ -646,11 +756,11 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                 <Card
                   className="overflow-hidden group hover:shadow-lg transition-all duration-300 p-0 cursor-pointer"
                   onClick={() => {
-                    setSelectedVideo({ 
+                    setSelectedVideo({
                       key: `videos/${currentTaskId}.mp4`,
                       url: currentVideoUrl,
                       uploaded: new Date().toISOString(),
-                      size: 0
+                      size: 0,
                     })
                     setIsModalOpen(true)
                   }}
@@ -687,8 +797,8 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                               uploaded: new Date().toISOString(),
                               size: 0,
                               metadata: {
-                                taskId: currentTaskId
-                              }
+                                taskId: currentTaskId,
+                              },
                             }
                             handleRemixClick(tempVideo)
                           }}
@@ -712,7 +822,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                   </CardContent>
                 </Card>
               )}
-              
+
               {/* 已保存的视频 */}
               {storedVideos.map((video, index) => (
                 <Card
@@ -734,7 +844,8 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                             e.stopPropagation()
                             const a = document.createElement("a")
                             a.href = video.url
-                            a.download = video.key.split('/').pop() || 'video.mp4'
+                            a.download =
+                              video.key.split("/").pop() || "video.mp4"
                             a.click()
                           }}
                           size="sm"
@@ -780,7 +891,10 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
       </Card>
 
       {/* 视频播放模态框 */}
-      <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
+      <Dialog
+        open={isModalOpen}
+        onOpenChange={setIsModalOpen}
+      >
         <DialogContent className="max-w-3xl p-0 gap-0 border-0 bg-black [&>button]:hidden">
           {selectedVideo && (
             <video
@@ -794,7 +908,10 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
       </Dialog>
 
       {/* Remix 对话框 */}
-      <Dialog open={isRemixDialogOpen} onOpenChange={setIsRemixDialogOpen}>
+      <Dialog
+        open={isRemixDialogOpen}
+        onOpenChange={setIsRemixDialogOpen}
+      >
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -835,7 +952,10 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
       </Dialog>
 
       {/* 删除确认对话框 */}
-      <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+      <Dialog
+        open={isDeleteDialogOpen}
+        onOpenChange={setIsDeleteDialogOpen}
+      >
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive">
@@ -866,7 +986,6 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
           </div>
         </DialogContent>
       </Dialog>
-
     </div>
   )
 }

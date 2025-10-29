@@ -47,6 +47,9 @@ import {
 import { proxyImageUrl } from "@/lib/proxy-image"
 import { listStoredImages, deleteStoredImage } from "@/lib/api/image-storage"
 import { useImageStore } from "@/store/image-store"
+import { useTaskStore } from "@/store/task-store"
+
+import { loadProvidersConfig } from "@/lib/storage"
 
 interface ImageGeneratorProps {
   config: {
@@ -60,30 +63,50 @@ type ServiceType = "nano-banana" | "midjourney"
 export function ImageGenerator({ config }: ImageGeneratorProps) {
   // Zustand store - 持久化状态
   const {
-    prompt, setPrompt,
-    model, setModel,
-    loading, setLoading,
-    generatedImages, setGeneratedImages,
-    error, setError,
-    referenceImages, addReferenceImage, removeReferenceImage,
-    loadingStoredImages, setLoadingStoredImages,
-    serviceType, setServiceType,
-    generationCount, setGenerationCount,
-    imageSize, setImageSize,
-    taskId, setTaskId,
-    taskStatus, setTaskStatus,
-    progress, setProgress,
-    mjBotType, setMjBotType,
-    mjMode, setMjMode,
-    aspectRatio, setAspectRatio,
+    prompt,
+    setPrompt,
+    model,
+    setModel,
+    loading,
+    setLoading,
+    generatedImages,
+    setGeneratedImages,
+    error,
+    setError,
+    referenceImages,
+    addReferenceImage,
+    removeReferenceImage,
+    loadingStoredImages,
+    setLoadingStoredImages,
+    serviceType,
+    setServiceType,
+    generationCount,
+    setGenerationCount,
+    imageSize,
+    setImageSize,
+    taskId,
+    setTaskId,
+    taskStatus,
+    setTaskStatus,
+    progress,
+    setProgress,
+    mjBotType,
+    setMjBotType,
+    mjMode,
+    setMjMode,
+    aspectRatio,
+    setAspectRatio,
     setIsPolling,
   } = useImageStore()
 
   // Local UI state - 不需要持久化
   const [previewImage, setPreviewImage] = useState<string | null>(null)
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
-  const [deletingImage, setDeletingImage] = useState<{ imageUrl: string; index: number } | null>(null)
-  
+  const [deletingImage, setDeletingImage] = useState<{
+    imageUrl: string
+    index: number
+  } | null>(null)
+
   // 轮询定时器
   const pollingTimerRef = useRef<number | null>(null)
   const pollingErrorCountRef = useRef(0)
@@ -96,7 +119,7 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
         const images = await listStoredImages(50) // 加载最近 50 张图片
         setGeneratedImages(images)
       } catch (error) {
-        console.error('Failed to load stored images:', error)
+        console.error("Failed to load stored images:", error)
       } finally {
         setLoadingStoredImages(false)
       }
@@ -106,14 +129,36 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     if (generatedImages.length === 0 && !loadingStoredImages) {
       loadStoredImages()
     }
-    
-    // 如果有正在进行的任务，恢复轮询
-    if (taskId && loading && serviceType === 'midjourney' && !pollingTimerRef.current) {
-      console.log('🔄 检测到未完成的图片生成任务，恢复轮询:', taskId)
-      startPollingWithTaskId(taskId)
+
+    // 如果有正在进行的任务，恢复轮询（使用提交时的 provider 配置）
+    const { imageTaskId, imageProviderId } = useTaskStore.getState()
+    if (
+      imageTaskId &&
+      serviceType === "midjourney" &&
+      !pollingTimerRef.current
+    ) {
+      // 从本地配置中查找提交任务时的 provider 配置
+      const cfgAll = loadProvidersConfig()
+      const provider = cfgAll.providers.find(
+        (p) => p.id === imageProviderId && p.apiKey
+      )
+      const resumeConfig = provider
+        ? { baseUrl: provider.baseUrl, apiKey: provider.apiKey }
+        : config
+
+      console.log(
+        "🔄 检测到未完成的图片生成任务，恢复轮询:",
+        imageTaskId,
+        "provider:",
+        imageProviderId
+      )
+      setLoading(true)
+      setTaskStatus("PROCESSING")
+      setTaskId(imageTaskId)
+      startPollingWithTaskId(imageTaskId, resumeConfig)
     }
   }, []) // 空依赖数组，只在组件挂载时执行一次
-  
+
   // 清理定时器
   useEffect(() => {
     return () => {
@@ -124,18 +169,23 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
   }, [])
 
   // 轮询函数 - 使用 setInterval 实现
-  const startPollingWithTaskId = (taskId: string) => {
+  const startPollingWithTaskId = (
+    taskId: string,
+    overrideConfig?: { baseUrl: string; apiKey: string }
+  ) => {
     if (pollingTimerRef.current) {
       clearInterval(pollingTimerRef.current)
     }
+
+    const effectiveConfig = overrideConfig ?? config
 
     setIsPolling(true)
     pollingErrorCountRef.current = 0
 
     pollingTimerRef.current = setInterval(async () => {
       try {
-        console.log('🔄 轮询图片生成状态，taskId:', taskId)
-        const result = await fetchMidjourneyTaskStatus(config, taskId)
+        console.log("🔄 轮询图片生成状态，taskId:", taskId)
+        const result = await fetchMidjourneyTaskStatus(effectiveConfig, taskId)
 
         // 更新进度
         if (result.progress !== undefined) {
@@ -154,7 +204,7 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
           setProgress(100)
           setTaskStatus("SUCCESS")
 
-          console.log('✅ 图片生成完成')
+          console.log("✅ 图片生成完成")
 
           // 获取图片 URL - 优先使用 imageUrls
           let imageUrls: string[] = []
@@ -164,12 +214,15 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
             imageUrls = [result.imageUrl]
           }
 
+          // 任务已完成，清除持久化任务
+          useTaskStore.getState().setTask("image", null)
+
           if (imageUrls.length > 0) {
             // 保存到 R2
             const savedImages = await saveImagesToR2(imageUrls)
             setGeneratedImages([...savedImages, ...generatedImages])
           }
-        } 
+        }
         // 失败
         else if (result.status === "FAILURE" || result.status === "FAILED") {
           if (pollingTimerRef.current) {
@@ -180,22 +233,29 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
           setLoading(false)
           setProgress(0)
           setError("图片生成失败")
+
+          // 任务失败，清除持久化任务
+          useTaskStore.getState().setTask("image", null)
         }
       } catch (error: any) {
         pollingErrorCountRef.current++
-        console.error('❌ 轮询错误:', error)
-        
+        console.error("❌ 轮询错误:", error)
+
         if (pollingErrorCountRef.current >= 3) {
+          // 重置并延时重试，直到成功/失败
+          pollingErrorCountRef.current = 0
           if (pollingTimerRef.current) {
             clearInterval(pollingTimerRef.current)
             pollingTimerRef.current = null
           }
-          setIsPolling(false)
-          setLoading(false)
-          setError(error.message || "查询任务状态失败")
+          console.warn("轮询连续出错，5 秒后重试…")
+          setTimeout(
+            () => startPollingWithTaskId(taskId, effectiveConfig),
+            5000
+          )
         }
       }
-    }, 3000) // 每 3 秒轮询一次
+    }, 5000) // 每 5 秒轮询一次
   }
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -234,12 +294,12 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
 
     // 处理 prompt：添加相关参数
     let finalPrompt = prompt
-    
+
     // 如果是 NIJI bot，添加 --niji 参数
     if (mjBotType === "NIJI_JOURNEY" && !prompt.includes("--niji")) {
       finalPrompt = `${finalPrompt} --niji`
     }
-    
+
     // 如果选择了比例，添加 --ar 参数
     if (aspectRatio && !prompt.includes("--ar")) {
       finalPrompt = `${finalPrompt} --ar ${aspectRatio}`
@@ -257,9 +317,31 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     setTaskStatus("SUBMITTED")
     setProgress(10)
 
+    // 写入持久化任务（记录提交时的 providerId）
+    const cfgAll = loadProvidersConfig()
+    useTaskStore.getState().setTask("image", id, cfgAll.selectedProviderId)
+
     // 2. 使用新的轮询方式（setInterval）
-    console.log('🎬 开始轮询图片生成，taskId:', id)
-    startPollingWithTaskId(id)
+    console.log("🎬 开始轮询图片生成，taskId:", id)
+    startPollingWithTaskId(
+      id,
+      getPollingConfigForTask(cfgAll.selectedProviderId, config)
+    )
+  }
+
+  // 根据 providerId 生成用于轮询的配置
+  const getPollingConfigForTask = (
+    providerId: string | null,
+    fallback: { baseUrl: string; apiKey: string }
+  ): { baseUrl: string; apiKey: string } => {
+    if (!providerId) return fallback
+    const cfgAll = loadProvidersConfig()
+    const provider = cfgAll.providers.find(
+      (p) => p.id === providerId && p.apiKey
+    )
+    return provider
+      ? { baseUrl: provider.baseUrl, apiKey: provider.apiKey }
+      : fallback
   }
 
   // 主生成处理函数
@@ -338,10 +420,12 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
 
     try {
       const success = await deleteStoredImage(deletingImage.imageUrl)
-      
+
       if (success) {
         // 从列表中移除该图片
-        setGeneratedImages(generatedImages.filter((_, i) => i !== deletingImage.index))
+        setGeneratedImages(
+          generatedImages.filter((_, i) => i !== deletingImage.index)
+        )
         setIsDeleteDialogOpen(false)
         setDeletingImage(null)
       } else {
@@ -358,9 +442,7 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
       <Card>
         <CardHeader>
           <CardTitle>图片生成</CardTitle>
-          <CardDescription>
-            从文本描述创建精美图片
-          </CardDescription>
+          <CardDescription>从文本描述创建精美图片</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Service Type Selector */}
@@ -393,7 +475,12 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
           {/* Model Selector - conditional based on service type */}
           {serviceType === "nano-banana" && (
             <div className="space-y-1">
-              <Label htmlFor="model" className="text-sm">模型</Label>
+              <Label
+                htmlFor="model"
+                className="text-sm"
+              >
+                模型
+              </Label>
               <Select
                 value={model}
                 onValueChange={setModel}
@@ -500,7 +587,11 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
                     <button
                       key={item.ratio}
                       type="button"
-                      onClick={() => setAspectRatio(aspectRatio === item.ratio ? "" : item.ratio)}
+                      onClick={() =>
+                        setAspectRatio(
+                          aspectRatio === item.ratio ? "" : item.ratio
+                        )
+                      }
                       className={`
                         relative h-14 rounded-lg border-2 transition-all
                         flex flex-col items-center justify-center gap-1
@@ -521,14 +612,26 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
                           }
                         `}
                         style={{
-                          width: item.ratio === "1:1" ? "20px" : 
-                                 item.ratio === "4:3" ? "22px" : 
-                                 item.ratio === "3:4" ? "16px" :
-                                 item.ratio === "16:9" ? "24px" : "14px",
-                          height: item.ratio === "1:1" ? "20px" : 
-                                  item.ratio === "4:3" ? "16px" : 
-                                  item.ratio === "3:4" ? "22px" :
-                                  item.ratio === "16:9" ? "14px" : "24px",
+                          width:
+                            item.ratio === "1:1"
+                              ? "20px"
+                              : item.ratio === "4:3"
+                              ? "22px"
+                              : item.ratio === "3:4"
+                              ? "16px"
+                              : item.ratio === "16:9"
+                              ? "24px"
+                              : "14px",
+                          height:
+                            item.ratio === "1:1"
+                              ? "20px"
+                              : item.ratio === "4:3"
+                              ? "16px"
+                              : item.ratio === "3:4"
+                              ? "22px"
+                              : item.ratio === "16:9"
+                              ? "14px"
+                              : "24px",
                         }}
                       />
                       <span className="text-xs font-medium">{item.label}</span>
@@ -766,7 +869,10 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
       </Dialog>
 
       {/* 删除确认对话框 */}
-      <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+      <Dialog
+        open={isDeleteDialogOpen}
+        onOpenChange={setIsDeleteDialogOpen}
+      >
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-destructive">

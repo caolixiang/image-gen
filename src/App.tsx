@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ImageGenerator } from "@/components/image-generator"
 import { ImageDescriber } from "@/components/image-describer"
@@ -15,20 +15,32 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet"
-import { 
-  loadProvidersConfig, 
-  updateProviderKey, 
-  selectProvider, 
+import {
+  loadProvidersConfig,
+  updateProviderKey,
+  selectProvider,
   removeProviderKey,
   clearProvidersConfig,
-  getSelectedProvider 
+  getSelectedProvider,
 } from "@/lib/storage"
 import type { ProvidersConfig } from "@/lib/constants"
 
 export default function App() {
-  const [providersConfig, setProvidersConfig] = useState<ProvidersConfig>(() => 
+  const [providersConfig, setProvidersConfig] = useState<ProvidersConfig>(() =>
     loadProvidersConfig()
   )
+
+  // 一次性迁移：清理旧的本地持久化键，避免历史数据影响行为
+  useEffect(() => {
+    try {
+      const oldKeys = [
+        "image-generator-storage",
+        "video-generator-storage",
+        "image-describer-storage",
+      ]
+      oldKeys.forEach((k) => localStorage.removeItem(k))
+    } catch {}
+  }, [])
 
   // 获取当前选中的服务商配置
   const currentConfig = getSelectedProvider(providersConfig) || {
@@ -70,7 +82,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-xl font-semibold text-balance">
-                AI Media Studio
+                AI Image Studio
               </h1>
               <p className="text-xs text-muted-foreground">
                 Generate & Describe
@@ -112,9 +124,9 @@ export default function App() {
           className="w-full"
         >
           <TabsList className="grid w-full max-w-lg mx-auto grid-cols-3 mb-4">
-            <TabsTrigger value="video">视频生成</TabsTrigger>
-            <TabsTrigger value="generate">图片生成</TabsTrigger>
-            <TabsTrigger value="describe">图片描述</TabsTrigger>
+            <TabsTrigger value="video">Generate Video</TabsTrigger>
+            <TabsTrigger value="generate">Generate Image</TabsTrigger>
+            <TabsTrigger value="describe">Describe Image</TabsTrigger>
           </TabsList>
 
           <TabsContent
