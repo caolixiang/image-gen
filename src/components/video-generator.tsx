@@ -747,7 +747,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {inProgressVideoJobs.length > 0 ? (
+          {inProgressVideoJobs.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2 gap-6">
               {inProgressVideoJobs.map((job) => (
                 <Card
@@ -818,7 +818,8 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                 </Card>
               ))}
             </div>
-          ) : loadingStoredVideos ? (
+          )}
+          {loadingStoredVideos ? (
             <div className="flex items-center justify-center py-12">
               <div className="text-center space-y-3">
                 <Loader2 className="w-8 h-8 mx-auto animate-spin text-primary" />
