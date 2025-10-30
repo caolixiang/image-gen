@@ -139,15 +139,31 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     }
   }
 
+  // 统一加载图片到参考图（支持 JPG/PNG/WEBP）
+  const loadFileToReference = (file: File) => {
+    const type = (file.type || "").toLowerCase()
+    const ok =
+      type === "image/jpeg" || type === "image/png" || type === "image/webp"
+    if (!ok) {
+      toast({
+        title: "文件格式错误",
+        description: "仅支持 JPG、PNG、WEBP 格式",
+        variant: "destructive",
+      })
+      return
+    }
+    setImageFile(file)
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      setReferenceImage(reader.result as string)
+    }
+    reader.readAsDataURL(file)
+  }
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
-      setImageFile(file)
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        setReferenceImage(reader.result as string)
-      }
-      reader.readAsDataURL(file)
+      loadFileToReference(file)
     }
   }
 
@@ -182,23 +198,30 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     const files = e.dataTransfer.files
     if (files && files.length > 0) {
       const file = files[0]
-      // 检查文件类型
-      if (file.type === "image/jpeg" || file.type === "image/png") {
-        setImageFile(file)
-        const reader = new FileReader()
-        reader.onloadend = () => {
-          setReferenceImage(reader.result as string)
-        }
-        reader.readAsDataURL(file)
-      } else {
-        toast({
-          title: "文件格式错误",
-          description: "仅支持 JPG 和 PNG 格式",
-          variant: "destructive",
-        })
-      }
+      loadFileToReference(file)
     }
   }
+
+  // 支持直接粘贴图片（全局监听 paste）
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items
+      if (!items || items.length === 0) return
+      for (const item of Array.from(items)) {
+        if (item.type && item.type.startsWith("image/")) {
+          const file = item.getAsFile()
+          if (file) {
+            e.preventDefault()
+            loadFileToReference(file)
+            toast({ title: "已粘贴图片", description: "已作为参考图添加" })
+            break
+          }
+        }
+      }
+    }
+    window.addEventListener("paste", onPaste as any)
+    return () => window.removeEventListener("paste", onPaste as any)
+  }, [])
 
   const handleGenerate = async () => {
     if (!config.baseUrl || !config.apiKey) {
@@ -404,7 +427,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                 id="video-image-upload"
                 ref={fileInputRef}
                 className="hidden"
-                accept="image/jpeg,image/png"
+                accept="image/jpeg,image/png,image/webp"
                 onChange={handleImageUpload}
               />
               <label
@@ -446,7 +469,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                         点击或拖拽图片到此处
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        支持 JPG、PNG 格式
+                        支持 JPG、PNG、WEBP（可直接粘贴/拖拽）
                       </p>
                     </div>
                   </>
