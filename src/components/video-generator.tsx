@@ -328,13 +328,14 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
       if (!taskId) {
         // 从文件名提取：videos/1761507295048-sora-2:task_01k8gzyem5e3fbt38yvtpkta6g.mp4
         const filename = remixingVideo.key
-          .replace("videos/", "")
-          .replace(".mp4", "")
-        // 移除时间戳前缀，保留 sora-xxx 部分
+          .replace(/^videos\//, "")
+          .replace(/\.mp4$/i, "")
+        // 仅当存在时间戳(纯数字)前缀时才移除；否则保留完整 taskId（如 sora-2:task_xxx）
         const parts = filename.split("-")
-        if (parts.length >= 2) {
-          // 移除第一个时间戳部分，重新组合剩余部分
+        if (parts.length >= 2 && /^\d{10,}$/.test(parts[0])) {
           taskId = parts.slice(1).join("-")
+        } else {
+          taskId = filename
         }
       }
 
