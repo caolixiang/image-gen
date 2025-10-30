@@ -29,16 +29,13 @@ import {
   Sparkles,
   RotateCcw,
 } from "lucide-react"
-import { getVideoStatus, remixVideo } from "@/lib/api/video-generation"
 import {
-  uploadVideoToR2,
   listStoredVideosPage,
   deleteStoredVideo,
   type R2Video,
 } from "@/lib/api/video-storage"
 import { useToast } from "@/hooks/use-toast"
 import { useVideoStore } from "@/store/video-store"
-import { useTaskStore } from "@/store/task-store"
 import { useJobQueue } from "@/store/job-queue"
 
 interface VideoGeneratorProps {
@@ -70,14 +67,10 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     setStatusText,
     currentVideoUrl,
     setCurrentVideoUrl,
-    currentTaskId,
-    setCurrentTaskId,
     storedVideos,
     setStoredVideos,
     loadingStoredVideos,
     setLoadingStoredVideos,
-    isPolling,
-    setIsPolling,
   } = useVideoStore()
 
   // Local UI state - 不需要持久化
@@ -104,8 +97,6 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
   const [videoHasMore, setVideoHasMore] = useState(false)
   const [loadingMoreVideos, setLoadingMoreVideos] = useState(false)
 
-  // 轮询定时器
-  const pollingTimerRef = useRef<number | null>(null)
   // Job queue hooks (video)
   const { jobs, enqueueVideoJob, retryTimeoutJob, cancelTimeoutJob, init } =
     useJobQueue()
@@ -121,57 +112,11 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
       )
   )
 
-  const pollingErrorCountRef = useRef(0)
-
-  const getPollingConfigForTask = (
-    providerId: string | null,
-    fallback: { baseUrl: string; apiKey: string }
-  ): { baseUrl: string; apiKey: string } => {
-    if (!providerId) return fallback
-    const cfgAll = loadProvidersConfig()
-    const provider = cfgAll.providers.find(
-      (p) => p.id === providerId && p.apiKey
-    )
-    return provider
-      ? { baseUrl: provider.baseUrl, apiKey: provider.apiKey }
-      : fallback
-  }
-
   // 页面加载时获取已存储的视频
   useEffect(() => {
     // 只在组件首次挂载且没有已加载的视频时才加载
     if (storedVideos.length === 0 && !loadingStoredVideos) {
       loadStoredVideos()
-    }
-
-    // 如果有正在进行的任务，恢复轮询（从持久化任务存储恢复，使用提交时的 provider 配置）
-    const { videoTaskId, videoProviderId } = useTaskStore.getState()
-    if (videoTaskId && !pollingTimerRef.current) {
-      // 若该任务已由队列托管，则不再在组件中恢复旧轮询，避免重复注入
-      const managedByQueue = useJobQueue
-        .getState()
-        .jobs.some((j) => j.kind === "video" && j.taskId === videoTaskId)
-      if (!managedByQueue) {
-        console.log(
-          "🔄 检测到未完成的视频任务，恢复轮询:",
-          videoTaskId,
-          "provider:",
-          videoProviderId
-        )
-        setIsGenerating(true)
-        setCurrentTaskId(videoTaskId)
-        const resumeConfig = getPollingConfigForTask(videoProviderId, config)
-        startPollingWithTaskId(videoTaskId, resumeConfig)
-      }
-    }
-  }, [])
-
-  // 清理定时器
-  useEffect(() => {
-    return () => {
-      if (pollingTimerRef.current) {
-        clearInterval(pollingTimerRef.current)
-      }
     }
   }, [])
 
@@ -303,135 +248,6 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
     }
   }
 
-  const startPollingWithTaskId = (
-    taskId: string,
-    overrideConfig?: { baseUrl: string; apiKey: string }
-  ) => {
-    if (pollingTimerRef.current) {
-      clearInterval(pollingTimerRef.current)
-    }
-    const effectiveConfig = overrideConfig ?? config
-
-    setIsPolling(true) // 标记开始轮询
-    pollingTimerRef.current = setInterval(async () => {
-      try {
-        console.log("🔄 开始轮询，taskId:", taskId)
-        const task = await getVideoStatus(
-          effectiveConfig.baseUrl,
-          effectiveConfig.apiKey,
-          taskId
-        )
-
-        const taskProgress =
-          typeof task.progress === "number" ? task.progress : 0
-        setProgress(Math.max(10, Math.min(100, taskProgress)))
-
-        if (task.status === "completed") {
-          // 立即清除定时器，停止轮询
-          if (pollingTimerRef.current) {
-            clearInterval(pollingTimerRef.current)
-            pollingTimerRef.current = null
-          }
-
-          setIsPolling(false) // 标记停止轮询
-          setIsGenerating(false)
-          setProgress(100)
-          setStatusText("视频生成完成！")
-
-          // 若该任务由队列托管，则不在组件里再次注入 UI/保存，交由队列完成
-          const isManagedByQueue = useJobQueue
-            .getState()
-            .jobs.some((j) => j.kind === "video" && j.taskId === taskId)
-          if (isManagedByQueue) {
-            useTaskStore.getState().setTask("video", null)
-            return
-          }
-
-          // 设置视频 URL 用于预览
-          if (task.video_url) {
-            console.log("🎬 视频生成完成，URL:", task.video_url)
-            setCurrentVideoUrl(task.video_url)
-
-            // 自动保存到 R2
-            try {
-              const result = await uploadVideoToR2(
-                task.video_url,
-                `${taskId}.mp4`,
-                taskId
-              )
-
-              if (result.alreadyExists) {
-                toast({
-                  title: "视频已存在",
-                  description: "该视频已在相册中，无需重复上传",
-                })
-              } else {
-                toast({
-                  title: "生成成功",
-                  description: "视频生成完成并已保存到相册！",
-                })
-              }
-              // 成功（已存在或新上传完成）后，才清除持久化任务
-              useTaskStore.getState().setTask("video", null)
-            } catch (error: any) {
-              console.error("保存视频到 R2 失败:", error)
-              toast({
-                title: "保存失败",
-                description: "视频生成成功，但保存到相册失败",
-                variant: "destructive",
-              })
-            }
-          } else {
-            toast({
-              title: "生成成功",
-              description: "视频生成完成！",
-            })
-            useTaskStore.getState().setTask("video", null)
-          }
-        } else if (task.status === "failed" || task.status === "error") {
-          // 立即清除定时器，停止轮询
-          if (pollingTimerRef.current) {
-            clearInterval(pollingTimerRef.current)
-            pollingTimerRef.current = null
-          }
-          // 清除持久化任务
-          useTaskStore.getState().setTask("video", null)
-
-          setIsPolling(false) // 标记停止轮询
-          setIsGenerating(false)
-          setProgress(0)
-          setStatusText("视频生成失败")
-
-          toast({
-            title: "生成失败",
-            description: "视频生成失败，请重试",
-            variant: "destructive",
-          })
-        } else {
-          const displayProgress = taskProgress > 0 ? taskProgress : 10
-          setStatusText(`正在生成视频... ${displayProgress}%`)
-        }
-      } catch (error: any) {
-        pollingErrorCountRef.current++
-        if (pollingErrorCountRef.current >= 3) {
-          // 重置并延时重试，直到任务成功/失败
-          pollingErrorCountRef.current = 0
-          if (pollingTimerRef.current) {
-            clearInterval(pollingTimerRef.current)
-            pollingTimerRef.current = null
-          }
-          const errorMsg =
-            error.response?.data?.message || error.message || "查询视频状态失败"
-          console.warn("轮询连续出错，5 秒后重试…", errorMsg)
-          setTimeout(
-            () => startPollingWithTaskId(taskId, effectiveConfig),
-            5000
-          )
-        }
-      }
-    }, 5000)
-  }
-
   const handleDeleteClick = (video: R2Video, index: number) => {
     setDeletingVideo({ video, index })
     setIsDeleteDialogOpen(true)
@@ -534,24 +350,22 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
 
       console.log("🎬 使用 taskId 进行 Remix:", taskId)
 
-      const task = await remixVideo(config.baseUrl, config.apiKey, taskId, {
-        prompt: remixPrompt,
-      })
-
-      console.log("🎬 Remix 任务返回:", task)
-      console.log("🎬 Task ID:", task.id)
-
-      setCurrentTaskId(task.id)
-      setStatusText("任务已提交，正在生成视频...")
-      // 记录 remix 任务到持久化并按提交时 provider 轮询
       const cfgAll = loadProvidersConfig()
-      useTaskStore
-        .getState()
-        .setTask("video", task.id, cfgAll.selectedProviderId)
-      startPollingWithTaskId(
-        task.id,
-        getPollingConfigForTask(cfgAll.selectedProviderId, config)
+      enqueueVideoJob(
+        {
+          prompt: remixPrompt,
+          remixOfTaskId: taskId,
+          model: "sora-2",
+        },
+        { providerId: cfgAll.selectedProviderId, configFallback: config }
       )
+
+      setIsGenerating(false)
+      setStatusText("Remix 任务已加入队列")
+      toast({
+        title: "已加入队列",
+        description: "完成后会自动保存到相册",
+      })
     } catch (error: any) {
       setIsGenerating(false)
       toast({
@@ -828,7 +642,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                 </p>
               </div>
             </div>
-          ) : isGenerating && isPolling ? (
+          ) : isGenerating ? (
             <div className="flex items-center justify-center py-12">
               <div className="text-center space-y-3">
                 <Loader2 className="w-8 h-8 mx-auto animate-spin text-primary" />
@@ -847,7 +661,7 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                     className="overflow-hidden group hover:shadow-lg transition-all duration-300 p-0 cursor-pointer"
                     onClick={() => {
                       setSelectedVideo({
-                        key: `videos/${currentTaskId}.mp4`,
+                        key: `videos/current.mp4`,
                         url: currentVideoUrl,
                         uploaded: new Date().toISOString(),
                         size: 0,
@@ -869,33 +683,13 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
                               e.stopPropagation()
                               const a = document.createElement("a")
                               a.href = currentVideoUrl
-                              a.download = `video-${currentTaskId}.mp4`
+                              a.download = `video.mp4`
                               a.click()
                             }}
                             size="sm"
                             className="h-8 w-8 p-0 bg-blue-600 hover:bg-blue-700 text-white shadow-lg"
                           >
                             <Download className="w-4 h-4" />
-                          </Button>
-                          <Button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              // 创建一个临时的 R2Video 对象用于 Remix
-                              const tempVideo: R2Video = {
-                                key: `videos/${currentTaskId}.mp4`,
-                                url: currentVideoUrl,
-                                uploaded: new Date().toISOString(),
-                                size: 0,
-                                metadata: {
-                                  taskId: currentTaskId,
-                                },
-                              }
-                              handleRemixClick(tempVideo)
-                            }}
-                            size="sm"
-                            className="h-8 w-8 p-0 bg-purple-600 hover:bg-purple-700 text-white shadow-lg"
-                          >
-                            <Sparkles className="w-4 h-4" />
                           </Button>
                           <Button
                             onClick={(e) => {

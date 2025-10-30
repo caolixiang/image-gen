@@ -7,7 +7,11 @@ import {
   saveImagesToR2,
   type GenerationConfig,
 } from "@/lib/api/image-generation"
-import { generateVideo, getVideoStatus } from "@/lib/api/video-generation"
+import {
+  generateVideo,
+  getVideoStatus,
+  remixVideo,
+} from "@/lib/api/video-generation"
 import { uploadVideoToR2 } from "@/lib/api/video-storage"
 import { useImageStore } from "@/store/image-store"
 import { useVideoStore } from "@/store/video-store"
@@ -41,6 +45,8 @@ export interface VideoJobParams {
   aspectRatio?: string
   duration?: string
   model?: string
+  // 当存在该字段时，表示 Remix 某个已有任务 ID
+  remixOfTaskId?: string
 }
 
 export interface BaseJob {
@@ -82,7 +88,7 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000 // 10 分钟
 const pollTimers = new Map<string, number>() // jobId -> setInterval id
 const TAB_ID = Math.random().toString(36).slice(2)
 const MASTER_KEY = "jobs-master-v1"
-const MASTER_TTL = 10_000
+const MASTER_TTL = 3_000
 let bc: BroadcastChannel | null = null
 
 // Ensure single init and single heartbeat even under React StrictMode
@@ -186,6 +192,13 @@ export const useJobQueue = create<JobQueueState>()(
         // 迁移清理：移除旧版组件级持久化任务键，避免与队列双通道冲突
         try {
           localStorage.removeItem("pending-tasks")
+        } catch {}
+        // 如历史上 jobs-v1 过大（例如包含 base64），首次加载时清空一次，避免配额报错
+        try {
+          const raw = localStorage.getItem("jobs-v1")
+          if (raw && raw.length > 3_000_000) {
+            localStorage.removeItem("jobs-v1")
+          }
         } catch {}
 
         // 心跳（StrictMode 下防重复）
@@ -350,7 +363,57 @@ export const useJobQueue = create<JobQueueState>()(
           bc?.postMessage({ type: "jobs:update", payload: get().jobs })
       },
     }),
-    { name: "jobs-v1" }
+    {
+      name: "jobs-v1",
+      // 仅持久化必要字段，剔除大体积 base64，并限制数量，避免超过 localStorage 配额
+      partialize: (state) => {
+        try {
+          const jobs = Array.isArray((state as any).jobs)
+            ? (state as any).jobs
+            : []
+          const sanitized = jobs.map((j: any) => {
+            const p = j.params ? { ...j.params } : undefined
+            if (j.kind === "image" && p && Array.isArray(p.referenceImages))
+              p.referenceImages = []
+            if (j.kind === "video" && p && "referenceImageBase64" in p)
+              delete (p as any).referenceImageBase64
+            return { ...j, params: p }
+          })
+          const inProgress = sanitized.filter(
+            (j: any) => j.status !== "success"
+          )
+          const recentSuccess = sanitized
+            .filter((j: any) => j.status === "success")
+            .slice(-10)
+          const finalJobs = [...inProgress, ...recentSuccess].slice(-100)
+          return { jobs: finalJobs, concurrency: (state as any).concurrency }
+        } catch {
+          return {
+            jobs: (state as any).jobs,
+            concurrency: (state as any).concurrency,
+          }
+        }
+      },
+      // 在 rehydrate 完成后，尽快恢复轮询与推进，避免刷新后短时间内看不到进行中的任务
+      onRehydrateStorage: () => {
+        return () => {
+          try {
+            // 延迟到下一轮事件循环，确保 rehydrate 的 jobs 已写入 state
+            setTimeout(() => {
+              const { isMaster } = useJobQueue.getState()
+              if (isMaster) {
+                resumeActivePollers()
+                promoteQueuedIfAvailable()
+                bc?.postMessage({
+                  type: "jobs:update",
+                  payload: useJobQueue.getState().jobs,
+                })
+              }
+            }, 0)
+          } catch {}
+        }
+      },
+    }
   )
 )
 
@@ -486,6 +549,10 @@ async function startImageSubmission(job: ImageJob) {
       job.status = "processing"
       job.progress = Math.max(job.progress, 10)
       job.updatedAt = now()
+      // 提交成功后，移除大体积的引用图 base64，降低持久化体积
+      try {
+        ;(job.params as any).referenceImages = []
+      } catch {}
       useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
 
       startImagePolling(job, effective)
@@ -636,23 +703,41 @@ async function startVideoSubmission(job: VideoJob) {
     }
 
     try {
-      const imageFile = job.params.referenceImageBase64
-        ? dataUrlToFile(job.params.referenceImageBase64, "reference.png")
-        : undefined
+      let task: any
+      if (job.params.remixOfTaskId) {
+        // Remix 模式：基于已有任务 ID 进行再次生成
+        task = await remixVideo(
+          effective.baseUrl,
+          effective.apiKey,
+          job.params.remixOfTaskId,
+          { prompt: job.params.prompt }
+        )
+      } else {
+        const imageFile = job.params.referenceImageBase64
+          ? dataUrlToFile(job.params.referenceImageBase64, "reference.png")
+          : undefined
 
-      const task = await generateVideo(effective.baseUrl, effective.apiKey, {
-        prompt: job.params.prompt,
-        imageFile,
-        model: job.params.model || "sora-2",
-        size: toSize(job.params.aspectRatio),
-        seconds: toSeconds(job.params.duration),
-        watermark: false,
-      })
+        task = await generateVideo(effective.baseUrl, effective.apiKey, {
+          prompt: job.params.prompt,
+          imageFile,
+          model: job.params.model || "sora-2",
+          size: toSize(job.params.aspectRatio),
+          seconds: toSeconds(job.params.duration),
+          watermark: false,
+        })
+      }
 
       job.taskId = task.id
       job.status = "processing"
       job.progress = Math.max(10, task.progress || 0)
       job.updatedAt = now()
+      // 提交成功后，去除大体积的引用图 base64，避免持久化占用过大导致丢失
+      // 仅影响刷新前仍处于 queued/submitting 的任务；processing 以后无需该字段
+      if (job.params && "referenceImageBase64" in job.params) {
+        try {
+          ;(job.params as any).referenceImageBase64 = undefined
+        } catch {}
+      }
       useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
 
       startVideoPolling(job, effective)
