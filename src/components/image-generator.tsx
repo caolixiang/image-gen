@@ -555,7 +555,23 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="prompt">提示词</Label>
+            <div className="flex items-center justify-between">
+              <Label
+                htmlFor="prompt"
+                className="text-sm font-medium"
+              >
+                提示词
+              </Label>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setPrompt("")}
+                disabled={!prompt.trim()}
+              >
+                <RotateCcw className="h-3.5 w-3.5 mr-1" /> 清空
+              </Button>
+            </div>
             <Textarea
               id="prompt"
               placeholder="一只可爱的猫咪，高清，4K..."
