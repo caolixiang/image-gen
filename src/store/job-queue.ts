@@ -183,6 +183,11 @@ export const useJobQueue = create<JobQueueState>()(
           }
         } catch {}
 
+        // 迁移清理：移除旧版组件级持久化任务键，避免与队列双通道冲突
+        try {
+          localStorage.removeItem("pending-tasks")
+        } catch {}
+
         // 心跳（StrictMode 下防重复）
         if (heartbeatTimer) {
           clearInterval(heartbeatTimer)
@@ -399,6 +404,11 @@ function promoteQueuedIfAvailable() {
     )
     if (vidx >= 0) {
       const vjob = jobs[vidx] as VideoJob
+      // 先占位成 submitting，防止并发拉起同一条 queued 任务
+      if (vjob.status !== "queued" || submissionInFlight.has(vjob.id)) return
+      vjob.status = "submitting"
+      vjob.updatedAt = now()
+      useJobQueue.setState({ jobs: [...jobs] })
       startVideoSubmission(vjob)
     }
   }
@@ -582,69 +592,78 @@ function startImagePolling(job: ImageJob, effective: GenerationConfig) {
 
 // ---- Video flow ----
 async function startVideoSubmission(job: VideoJob) {
-  const { jobs } = useJobQueue.getState()
-  const effective = getEffectiveConfigForProvider(
-    job.providerId,
-    getFallbackFromProvider(job.providerId)
-  )
-  if (!effective.baseUrl || !effective.apiKey) {
-    useJobQueue.setState({ jobs: jobs.filter((j) => j.id !== job.id) })
-    return
-  }
-
-  job.status = "submitting"
-  job.updatedAt = now()
-  useJobQueue.setState({ jobs: [...jobs] })
-
-  // helpers
-  const toSize = (ar?: string) => {
-    if (!ar) return "720x1280"
-    if (ar.includes("16:9")) return "1280x720"
-    if (ar.includes("9:16")) return "720x1280"
-    return "720x1280"
-  }
-  const toSeconds = (d?: string) => {
-    if (!d) return 15
-    const m = d.match(/(\d+)/)
-    return m ? parseInt(m[1], 10) : 15
-  }
-  const dataUrlToFile = (dataUrl: string, filename: string): File => {
-    const arr = dataUrl.split(",")
-    const mimeMatch = arr[0].match(/:(.*?);/)
-    const mime = mimeMatch ? mimeMatch[1] : "image/png"
-    const bstr = atob(arr[1])
-    const n = bstr.length
-    const u8arr = new Uint8Array(n)
-    for (let i = 0; i < n; i++) u8arr[i] = bstr.charCodeAt(i)
-    return new File([u8arr], filename, { type: mime })
-  }
-
+  // 防重复：同一 job 在提交中则直接忽略
+  if (submissionInFlight.has(job.id)) return
+  submissionInFlight.add(job.id)
   try {
-    const imageFile = job.params.referenceImageBase64
-      ? dataUrlToFile(job.params.referenceImageBase64, "reference.png")
-      : undefined
+    const { jobs } = useJobQueue.getState()
+    const effective = getEffectiveConfigForProvider(
+      job.providerId,
+      getFallbackFromProvider(job.providerId)
+    )
+    if (!effective.baseUrl || !effective.apiKey) {
+      useJobQueue.setState({ jobs: jobs.filter((j) => j.id !== job.id) })
+      return
+    }
 
-    const task = await generateVideo(effective.baseUrl, effective.apiKey, {
-      prompt: job.params.prompt,
-      imageFile,
-      model: job.params.model || "sora-2",
-      size: toSize(job.params.aspectRatio),
-      seconds: toSeconds(job.params.duration),
-      watermark: false,
-    })
+    if (job.status !== "submitting") {
+      job.status = "submitting"
+      job.updatedAt = now()
+      useJobQueue.setState({ jobs: [...jobs] })
+    }
 
-    job.taskId = task.id
-    job.status = "processing"
-    job.progress = Math.max(10, task.progress || 0)
-    job.updatedAt = now()
-    useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
+    // helpers
+    const toSize = (ar?: string) => {
+      if (!ar) return "720x1280"
+      if (ar.includes("16:9")) return "1280x720"
+      if (ar.includes("9:16")) return "720x1280"
+      return "720x1280"
+    }
+    const toSeconds = (d?: string) => {
+      if (!d) return 15
+      const m = d.match(/(\d+)/)
+      return m ? parseInt(m[1], 10) : 15
+    }
+    const dataUrlToFile = (dataUrl: string, filename: string): File => {
+      const arr = dataUrl.split(",")
+      const mimeMatch = arr[0].match(/:(.*?);/)
+      const mime = mimeMatch ? mimeMatch[1] : "image/png"
+      const bstr = atob(arr[1])
+      const n = bstr.length
+      const u8arr = new Uint8Array(n)
+      for (let i = 0; i < n; i++) u8arr[i] = bstr.charCodeAt(i)
+      return new File([u8arr], filename, { type: mime })
+    }
 
-    startVideoPolling(job, effective)
-  } catch (err) {
-    console.error("Video job submission failed:", err)
-    useJobQueue.setState({
-      jobs: useJobQueue.getState().jobs.filter((j) => j.id !== job.id),
-    })
+    try {
+      const imageFile = job.params.referenceImageBase64
+        ? dataUrlToFile(job.params.referenceImageBase64, "reference.png")
+        : undefined
+
+      const task = await generateVideo(effective.baseUrl, effective.apiKey, {
+        prompt: job.params.prompt,
+        imageFile,
+        model: job.params.model || "sora-2",
+        size: toSize(job.params.aspectRatio),
+        seconds: toSeconds(job.params.duration),
+        watermark: false,
+      })
+
+      job.taskId = task.id
+      job.status = "processing"
+      job.progress = Math.max(10, task.progress || 0)
+      job.updatedAt = now()
+      useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
+
+      startVideoPolling(job, effective)
+    } catch (err) {
+      console.error("Video job submission failed:", err)
+      useJobQueue.setState({
+        jobs: useJobQueue.getState().jobs.filter((j) => j.id !== job.id),
+      })
+    }
+  } finally {
+    submissionInFlight.delete(job.id)
   }
 }
 
