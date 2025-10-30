@@ -63,7 +63,12 @@ export const useVideoStore = create<VideoState>()((set) => ({
   setCurrentVideoUrl: (url) => set({ currentVideoUrl: url }),
   setCurrentTaskId: (taskId) => set({ currentTaskId: taskId }),
   setStoredVideos: (videos) =>
-    set({ storedVideos: [...new Map(videos.map((v) => [v.key, v])).values()] }),
+    set({
+      storedVideos: [...new Map(videos.map((v) => [v.key, v])).values()].sort(
+        (a, b) =>
+          new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime()
+      ),
+    }),
   setLoadingStoredVideos: (loading) => set({ loadingStoredVideos: loading }),
   setIsPolling: (isPolling) => set({ isPolling }),
   resetCurrentVideo: () =>

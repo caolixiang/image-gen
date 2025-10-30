@@ -114,6 +114,10 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     imageUrl: string
     index: number
   } | null>(null)
+  // 仅组件内维护包含上传时间的相册列表，用于按时间排序
+  const [albumImages, setAlbumImages] = useState<
+    Array<{ key: string; url: string; uploaded: string }>
+  >([])
 
   // 分页状态（仅组件内）
   const [imageNextCursor, setImageNextCursor] = useState<string | undefined>(
@@ -128,7 +132,13 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
       try {
         setLoadingStoredImages(true)
         const page = await listStoredImagesPage(50) // 首次加载 50 张
-        setGeneratedImages(page.images.map((img) => img.url))
+        // 全局按上传时间倒序排序
+        const sorted = [...page.images].sort(
+          (a, b) =>
+            new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime()
+        )
+        setAlbumImages(sorted)
+        setGeneratedImages(sorted.map((img) => img.url))
         setImageHasMore(page.truncated)
         setImageNextCursor(page.cursor)
       } catch (error) {
@@ -169,8 +179,20 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
 
     // 保存到 R2
     const savedImages = await saveImagesToR2(imageUrls)
-    // 将新图片添加到现有图片列表的前面
-    setGeneratedImages([...savedImages, ...generatedImages])
+    // 更新本地相册与展示列表（新图置顶；上传时间取当前时间做占位）
+    const nowIso = new Date().toISOString()
+    const toItems = savedImages.map((url) => ({
+      key: url.replace(/^\/?api\/r2-image\//, ""),
+      url,
+      uploaded: nowIso,
+    }))
+    const merged = [...toItems, ...albumImages]
+    // 按时间倒序，保证相册有序
+    merged.sort(
+      (a, b) => new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime()
+    )
+    setAlbumImages(merged)
+    setGeneratedImages(merged.map((it) => it.url))
   }
 
   // Midjourney 生成处理（改为入队，占位 + 调度）
@@ -264,10 +286,12 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
       const success = await deleteStoredImage(deletingImage.imageUrl)
 
       if (success) {
-        // 从列表中移除该图片
-        setGeneratedImages(
-          generatedImages.filter((_, i) => i !== deletingImage.index)
+        // 从本地相册与展示列表中移除该图片
+        const nextAlbum = albumImages.filter(
+          (it) => it.url !== deletingImage.imageUrl
         )
+        setAlbumImages(nextAlbum)
+        setGeneratedImages(nextAlbum.map((it) => it.url))
         setIsDeleteDialogOpen(false)
         setDeletingImage(null)
       } else {
@@ -285,10 +309,25 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     try {
       setLoadingMoreImages(true)
       const page = await listStoredImagesPage(50, imageNextCursor)
-      setGeneratedImages([
-        ...generatedImages,
-        ...page.images.map((img) => img.url),
-      ])
+      // 合并 + 去重（按 key）
+      const mergedMap = new Map<
+        string,
+        { key: string; url: string; uploaded: string }
+      >()
+      ;[...albumImages, ...page.images].forEach((img) => {
+        mergedMap.set(img.key, {
+          key: img.key,
+          url: img.url,
+          uploaded: img.uploaded,
+        })
+      })
+      // 全局按时间倒序
+      const nextAlbum = [...mergedMap.values()].sort(
+        (a, b) =>
+          new Date(b.uploaded).getTime() - new Date(a.uploaded).getTime()
+      )
+      setAlbumImages(nextAlbum)
+      setGeneratedImages(nextAlbum.map((it) => it.url))
       setImageHasMore(page.truncated)
       setImageNextCursor(page.cursor)
     } catch (error) {
