@@ -1,6 +1,6 @@
 import type React from "react"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -40,7 +40,6 @@ import {
 import { Slider } from "@/components/ui/slider"
 import {
   generateWithNanoBanana,
-  fetchMidjourneyTaskStatus,
   saveImagesToR2,
 } from "@/lib/api/image-generation"
 import { proxyImageUrl } from "@/lib/proxy-image"
@@ -49,10 +48,8 @@ import {
   deleteStoredImage,
 } from "@/lib/api/image-storage"
 import { useImageStore } from "@/store/image-store"
-import { useTaskStore } from "@/store/task-store"
-import { useJobQueue } from "@/store/job-queue"
 
-import { loadProvidersConfig } from "@/lib/storage"
+import { useJobQueue } from "@/store/job-queue"
 
 interface ImageGeneratorProps {
   config: {
@@ -87,16 +84,12 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     setGenerationCount,
     imageSize,
     setImageSize,
-    setTaskId,
-    setTaskStatus,
-    setProgress,
     mjBotType,
     setMjBotType,
     mjMode,
     setMjMode,
     aspectRatio,
     setAspectRatio,
-    setIsPolling,
   } = useImageStore()
 
   // Job queue hooks (v1: image only)
@@ -121,10 +114,6 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     imageUrl: string
     index: number
   } | null>(null)
-
-  // 轮询定时器
-  const pollingTimerRef = useRef<number | null>(null)
-  const pollingErrorCountRef = useRef(0)
 
   // 分页状态（仅组件内）
   const [imageNextCursor, setImageNextCursor] = useState<string | undefined>(
@@ -153,141 +142,7 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     if (generatedImages.length === 0 && !loadingStoredImages) {
       loadStoredImages()
     }
-
-    // 如果有正在进行的任务，恢复轮询（使用提交时的 provider 配置）
-    const { imageTaskId, imageProviderId } = useTaskStore.getState()
-    if (
-      imageTaskId &&
-      serviceType === "midjourney" &&
-      !pollingTimerRef.current
-    ) {
-      // 从本地配置中查找提交任务时的 provider 配置
-      const cfgAll = loadProvidersConfig()
-      const provider = cfgAll.providers.find(
-        (p) => p.id === imageProviderId && p.apiKey
-      )
-      const resumeConfig = provider
-        ? { baseUrl: provider.baseUrl, apiKey: provider.apiKey }
-        : config
-
-      console.log(
-        "🔄 检测到未完成的图片生成任务，恢复轮询:",
-        imageTaskId,
-        "provider:",
-        imageProviderId
-      )
-      setLoading(true)
-      setTaskStatus("PROCESSING")
-      setTaskId(imageTaskId)
-      startPollingWithTaskId(imageTaskId, resumeConfig)
-    }
   }, []) // 空依赖数组，只在组件挂载时执行一次
-
-  // 清理定时器
-  useEffect(() => {
-    return () => {
-      if (pollingTimerRef.current) {
-        clearInterval(pollingTimerRef.current)
-      }
-    }
-  }, [])
-
-  // 轮询函数 - 使用 setInterval 实现
-  const startPollingWithTaskId = (
-    taskId: string,
-    overrideConfig?: { baseUrl: string; apiKey: string }
-  ) => {
-    if (pollingTimerRef.current) {
-      clearInterval(pollingTimerRef.current)
-    }
-
-    const effectiveConfig = overrideConfig ?? config
-
-    setIsPolling(true)
-    pollingErrorCountRef.current = 0
-
-    pollingTimerRef.current = setInterval(async () => {
-      try {
-        console.log("🔄 轮询图片生成状态，taskId:", taskId)
-        const result = await fetchMidjourneyTaskStatus(effectiveConfig, taskId)
-        // 更新进度
-        if (result.progress !== undefined) {
-          setProgress(result.progress)
-        }
-        setTaskStatus(result.status)
-
-        // 成功
-        if (result.status === "SUCCESS") {
-          if (pollingTimerRef.current) {
-            clearInterval(pollingTimerRef.current)
-            pollingTimerRef.current = null
-          }
-          setIsPolling(false)
-          setLoading(false)
-          setProgress(100)
-          setTaskStatus("SUCCESS")
-
-          console.log("✅ 图片生成完成")
-
-          // 获取图片 URL - 优先使用 imageUrls
-          let imageUrls: string[] = []
-          if (result.imageUrls && result.imageUrls.length > 0) {
-            imageUrls = result.imageUrls.map((item) => item.url)
-          } else if (result.imageUrl) {
-            imageUrls = [result.imageUrl]
-          }
-
-          // 当该任务已由队列管理时，避免重复注入 UI（由队列统一保存并写入）
-          const isManagedByQueue = useJobQueue
-            .getState()
-            .jobs.some((j) => j.kind === "image" && j.taskId === taskId)
-
-          if (!isManagedByQueue && imageUrls.length > 0) {
-            try {
-              // 仅在不受队列管理的“历史任务恢复”场景下，执行保存并写入 UI
-              const savedImages = await saveImagesToR2(imageUrls)
-              setGeneratedImages([...savedImages, ...generatedImages])
-            } catch (e) {
-              console.error("保存历史任务图片失败:", e)
-            }
-          }
-          // 保存流程结束后再清除持久化任务
-          useTaskStore.getState().setTask("image", null)
-        }
-        // 失败
-        else if (result.status === "FAILURE" || result.status === "FAILED") {
-          if (pollingTimerRef.current) {
-            clearInterval(pollingTimerRef.current)
-            pollingTimerRef.current = null
-          }
-          setIsPolling(false)
-          setLoading(false)
-          setProgress(0)
-          setError("图片生成失败")
-
-          // 任务失败，清除持久化任务
-          useTaskStore.getState().setTask("image", null)
-        }
-      } catch (error: any) {
-        pollingErrorCountRef.current++
-        console.error("❌ 轮询错误:", error)
-
-        if (pollingErrorCountRef.current >= 3) {
-          // 重置并延时重试，直到成功/失败
-          pollingErrorCountRef.current = 0
-          if (pollingTimerRef.current) {
-            clearInterval(pollingTimerRef.current)
-            pollingTimerRef.current = null
-          }
-          console.warn("轮询连续出错，5 秒后重试…")
-          setTimeout(
-            () => startPollingWithTaskId(taskId, effectiveConfig),
-            5000
-          )
-        }
-      }
-    }, 5000) // 每 5 秒轮询一次
-  }
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -360,8 +215,6 @@ export function ImageGenerator({ config }: ImageGeneratorProps) {
     } finally {
       if (serviceType === "nano-banana") {
         setLoading(false)
-        setTaskStatus("")
-        setProgress(0)
       }
     }
   }

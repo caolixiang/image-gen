@@ -85,6 +85,13 @@ const MASTER_KEY = "jobs-master-v1"
 const MASTER_TTL = 10_000
 let bc: BroadcastChannel | null = null
 
+// Ensure single init and single heartbeat even under React StrictMode
+let initialized = false
+let heartbeatTimer: number | null = null
+
+// Prevent duplicate submissions for the same job (race between multiple promoters)
+const submissionInFlight = new Set<string>()
+
 function now() {
   return Date.now()
 }
@@ -141,6 +148,8 @@ export const useJobQueue = create<JobQueueState>()(
       concurrency: DEFAULT_CONCURRENCY,
 
       init: () => {
+        if (initialized) return
+        initialized = true
         // BroadcastChannel
         if (typeof window !== "undefined" && "BroadcastChannel" in window) {
           bc = new BroadcastChannel("jobs-channel")
@@ -174,8 +183,11 @@ export const useJobQueue = create<JobQueueState>()(
           }
         } catch {}
 
-        // 心跳
-        setInterval(() => {
+        // 心跳（StrictMode 下防重复）
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer)
+        }
+        heartbeatTimer = setInterval(() => {
           const { isMaster } = get()
           if (isMaster) {
             try {
@@ -206,7 +218,7 @@ export const useJobQueue = create<JobQueueState>()(
               }
             } catch {}
           }
-        }, 3000)
+        }, 3000) as unknown as number
 
         // 启动时恢复 processing/submitting 的轮询（仅主）
         setTimeout(() => {
@@ -365,6 +377,11 @@ function promoteQueuedIfAvailable() {
     )
     if (idx >= 0) {
       const job = jobs[idx] as ImageJob
+      // 先占位成 submitting，防止并发抢同一条 queued 任务
+      if (job.status !== "queued" || submissionInFlight.has(job.id)) return
+      job.status = "submitting"
+      job.updatedAt = now()
+      useJobQueue.setState({ jobs: [...jobs] })
       startImageSubmission(job)
     }
   }
@@ -416,52 +433,61 @@ function resumeActivePollers() {
 }
 
 async function startImageSubmission(job: ImageJob) {
-  const { jobs } = useJobQueue.getState()
-  const effective = getEffectiveConfigForProvider(
-    job.providerId,
-    getFallbackFromProvider(job.providerId)
-  )
-  if (!effective.baseUrl || !effective.apiKey) {
-    // 无配置，丢弃该任务
-    useJobQueue.setState({ jobs: jobs.filter((j) => j.id !== job.id) })
-    return
-  }
-
-  job.status = "submitting"
-  job.updatedAt = now()
-  useJobQueue.setState({ jobs: [...jobs] })
-
+  // 防重复：同一 job 在提交中则直接忽略
+  if (submissionInFlight.has(job.id)) return
+  submissionInFlight.add(job.id)
   try {
-    if (job.params.service !== "midjourney") {
-      // 目前仅支持 Midjourney 的异步流程；其他方式可直接同步生成再入库
-      throw new Error("Only midjourney service is supported in queue v1")
-    }
-    const finalPrompt = buildMidjourneyPrompt(
-      job.params.prompt,
-      job.params.aspectRatio,
-      job.params.mjBotType
+    const { jobs } = useJobQueue.getState()
+    const effective = getEffectiveConfigForProvider(
+      job.providerId,
+      getFallbackFromProvider(job.providerId)
     )
+    if (!effective.baseUrl || !effective.apiKey) {
+      // 无配置，丢弃该任务
+      useJobQueue.setState({ jobs: jobs.filter((j) => j.id !== job.id) })
+      return
+    }
 
-    const taskId = await submitMidjourneyTask(effective, {
-      prompt: finalPrompt,
-      base64Array: job.params.referenceImages,
-      botType: job.params.mjBotType,
-      modes: job.params.mjMode ? [job.params.mjMode] : undefined,
-    })
+    if (job.status !== "submitting") {
+      job.status = "submitting"
+      job.updatedAt = now()
+      useJobQueue.setState({ jobs: [...jobs] })
+    }
 
-    job.taskId = taskId
-    job.status = "processing"
-    job.progress = 10
-    job.updatedAt = now()
-    useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
+    try {
+      if (job.params.service !== "midjourney") {
+        // 目前仅支持 Midjourney 的异步流程；其他方式可直接同步生成再入库
+        throw new Error("Only midjourney service is supported in queue v1")
+      }
+      const finalPrompt = buildMidjourneyPrompt(
+        job.params.prompt,
+        job.params.aspectRatio,
+        job.params.mjBotType
+      )
 
-    startImagePolling(job, effective)
-  } catch (err: any) {
-    console.error("Image job submission failed:", err?.message || err)
-    // 失败直接丢弃
-    useJobQueue.setState({
-      jobs: useJobQueue.getState().jobs.filter((j) => j.id !== job.id),
-    })
+      const taskId = await submitMidjourneyTask(effective, {
+        prompt: finalPrompt,
+        base64Array: job.params.referenceImages,
+        botType: job.params.mjBotType,
+        modes: job.params.mjMode ? [job.params.mjMode] : undefined,
+      })
+
+      job.taskId = taskId
+      job.status = "processing"
+      job.progress = Math.max(job.progress, 10)
+      job.updatedAt = now()
+      useJobQueue.setState({ jobs: [...useJobQueue.getState().jobs] })
+
+      startImagePolling(job, effective)
+    } catch (err: any) {
+      console.error("Image job submission failed:", err?.message || err)
+      // 失败直接丢弃
+      useJobQueue.setState({
+        jobs: useJobQueue.getState().jobs.filter((j) => j.id !== job.id),
+      })
+    }
+  } finally {
+    submissionInFlight.delete(job.id)
   }
 }
 

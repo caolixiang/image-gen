@@ -141,14 +141,20 @@ export async function fetchMidjourneyTaskStatus(
     imageUrls?: Array<{ url: string }>
   }
 
-  // 解析进度字符串 "80%" -> 80
+  // 解析进度（兼容 0、"0%"、小数 0.83、"0.83%" 等）
   let progressValue: number | undefined = undefined
-  if (data.progress) {
-    if (typeof data.progress === "string") {
-      // 去掉 % 符号并转换为数字
-      progressValue = parseInt(data.progress.replace("%", ""))
-    } else if (typeof data.progress === "number") {
-      progressValue = data.progress
+  const p = data.progress as unknown
+  if (p !== undefined && p !== null) {
+    if (typeof p === "string") {
+      const trimmed = p.trim().replace("%", "")
+      const num = Number(trimmed)
+      if (!Number.isNaN(num)) {
+        const asPercent = num <= 1 ? num * 100 : num
+        progressValue = Math.round(Math.min(100, Math.max(0, asPercent)))
+      }
+    } else if (typeof p === "number") {
+      const asPercent = p <= 1 ? p * 100 : p
+      progressValue = Math.round(Math.min(100, Math.max(0, asPercent)))
     }
   }
 
