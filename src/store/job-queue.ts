@@ -263,7 +263,7 @@ export const useJobQueue = create<JobQueueState>()(
           timeoutAt: now() + DEFAULT_TIMEOUT_MS,
           params,
         }
-        set((s) => ({ jobs: [...s.jobs, job] }))
+        set((s) => ({ jobs: [job, ...s.jobs] }))
         // 主页面尝试推进
         setTimeout(() => {
           if (get().isMaster) {
@@ -292,7 +292,7 @@ export const useJobQueue = create<JobQueueState>()(
           timeoutAt: now() + DEFAULT_TIMEOUT_MS,
           params,
         }
-        set((s) => ({ jobs: [...s.jobs, job] }))
+        set((s) => ({ jobs: [job, ...s.jobs] }))
         // 主页面尝试推进
         setTimeout(() => {
           if (get().isMaster) {
