@@ -479,12 +479,23 @@ export function VideoGenerator({ config }: VideoGeneratorProps) {
           </Card>
 
           <div className="space-y-2">
-            <Label
-              htmlFor="video-description"
-              className="text-sm font-medium"
-            >
-              视频描述
-            </Label>
+            <div className="flex items-center justify-between">
+              <Label
+                htmlFor="video-description"
+                className="text-sm font-medium"
+              >
+                视频描述
+              </Label>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setDescription("")}
+                disabled={!description.trim()}
+              >
+                <RotateCcw className="h-3.5 w-3.5 mr-1" /> 清空
+              </Button>
+            </div>
             <Textarea
               id="video-description"
               placeholder="请描述你想要生成的视频内容..."
